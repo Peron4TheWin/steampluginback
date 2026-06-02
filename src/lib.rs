@@ -130,9 +130,6 @@ pub extern "system" fn DllMain(_hmodule: *mut u8, reason: u32, _reserved: *mut u
             log("Spawning server thread...");
             thread::spawn(|| run_server());
         }
-        0 => log("DLL_PROCESS_DETACH: DLL unloaded"),
-        2 => log("DLL_THREAD_ATTACH"),
-        3 => log("DLL_THREAD_DETACH"),
         _ => {}
     }
     1
