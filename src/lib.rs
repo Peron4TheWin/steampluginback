@@ -209,7 +209,7 @@ fn run_server() {
                 request.respond(response).ok();
             }
             Err(_) => {
-                let response = Response::from_string("Error fetching lua")
+                let response = Response::from_string(result.unwrap_err().to_string())
                     .with_status_code(500)
                     .with_header(
                         Header::from_bytes(
