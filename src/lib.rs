@@ -55,7 +55,8 @@ extern "system" {
 static STEAM_DIR: OnceLock<String> = OnceLock::new();
 static SYSTEM32_DIR: OnceLock<String> = OnceLock::new();
 static OWN_PATH: OnceLock<String> = OnceLock::new();
-
+#[link(name = "shell32")]
+unsafe extern "system" {}
 fn init_paths(hmodule: *mut u8) {
     unsafe {
         let mut sys_buf = vec![0u16; 260];
