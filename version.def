@@ -1,0 +1,15 @@
+EXPORTS
+    GetFileVersionInfoA
+    GetFileVersionInfoW
+    GetFileVersionInfoSizeA
+    GetFileVersionInfoSizeW
+    GetFileVersionInfoSizeExW
+    GetFileVersionInfoExW
+    VerFindFileA
+    VerFindFileW
+    VerInstallFileA
+    VerInstallFileW
+    VerLanguageNameA
+    VerLanguageNameW
+    VerQueryValueA
+    VerQueryValueW
