@@ -47,81 +47,75 @@ extern "system" {
     fn GetProcAddress(module: *mut u8, name: *const i8) -> *mut u8;
     fn GetModuleFileNameW(hmodule: *mut u8, filename: *mut u16, size: u32) -> u32;
     fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+    fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    fn ShellExecuteA(hwnd: *mut u8, op: *const i8, file: *const i8, params: *const i8, dir: *const i8, show: i32) -> *mut u8;
 }
+
+const MOVEFILE_DELAY_UNTIL_REBOOT: u32 = 4;
+const MOVEFILE_REPLACE_EXISTING: u32 = 1;
 
 // ── Paths ─────────────────────────────────────────────────────────────────────
 
 static STEAM_DIR: OnceLock<String> = OnceLock::new();
 static SYSTEM32_DIR: OnceLock<String> = OnceLock::new();
+static OWN_PATH: OnceLock<String> = OnceLock::new();
 
 fn init_paths(hmodule: *mut u8) {
     unsafe {
-        // System32 dinámico via GetSystemDirectoryW
         let mut sys_buf = vec![0u16; 260];
         let sys_len = GetSystemDirectoryW(sys_buf.as_mut_ptr(), 260);
         let system32 = if sys_len > 0 {
             sys_buf.truncate(sys_len as usize);
             OsString::from_wide(&sys_buf).to_string_lossy().to_string()
         } else {
-            // fallback usando variable de entorno
-            std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string())
-                + "\\System32"
+            std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string()) + "\\System32"
         };
         SYSTEM32_DIR.set(system32).ok();
 
-        // Steam dir: path de esta DLL sin el filename
         let mut dll_buf = vec![0u16; 260];
         let dll_len = GetModuleFileNameW(hmodule, dll_buf.as_mut_ptr(), 260);
-        let steam_dir = if dll_len > 0 {
+        if dll_len > 0 {
             dll_buf.truncate(dll_len as usize);
             let full = OsString::from_wide(&dll_buf).to_string_lossy().to_string();
-            full.rfind('\\')
+            OWN_PATH.set(full.clone()).ok();
+            let steam_dir = full.rfind('\\')
                 .map(|i| full[..i].to_string())
-                .unwrap_or_else(|| ".".to_string())
+                .unwrap_or_else(|| ".".to_string());
+            STEAM_DIR.set(steam_dir).ok();
         } else {
-            // fallback: directorio de trabajo actual
-            std::env::current_dir()
+            OWN_PATH.set(".\\version.dll".to_string()).ok();
+            let cwd = std::env::current_dir()
                 .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| ".".to_string())
-        };
-        STEAM_DIR.set(steam_dir).ok();
+                .unwrap_or_else(|_| ".".to_string());
+            STEAM_DIR.set(cwd).ok();
+        }
     }
 }
 
 fn steam_dir() -> &'static str {
     STEAM_DIR.get().map(|s| s.as_str()).unwrap_or(".")
 }
-
 fn system32_dir() -> &'static str {
     SYSTEM32_DIR.get().map(|s| s.as_str()).unwrap_or("C:\\Windows\\System32")
 }
-
-fn lua_dir() -> String {
-    format!("{}\\config\\stplug-in", steam_dir())
+fn own_path() -> &'static str {
+    OWN_PATH.get().map(|s| s.as_str()).unwrap_or(".\\version.dll")
 }
-
-fn key_path() -> String {
-    format!("{}\\key.txt", steam_dir())
-}
-
-fn log_path() -> String {
-    format!("{}\\backend.log", steam_dir())
-}
-
-fn real_version_dll_path() -> String {
-    format!("{}\\version.dll", system32_dir())
-}
+fn lua_dir() -> String { format!("{}\\config\\stplug-in", steam_dir()) }
+fn key_path() -> String { format!("{}\\key.txt", steam_dir()) }
+fn log_path() -> String { format!("{}\\backend.log", steam_dir()) }
+fn real_version_dll_path() -> String { format!("{}\\version.dll", system32_dir()) }
+fn cloudredirect_exe_path() -> String { format!("{}\\CloudRedirectCLI.exe", steam_dir()) }
+fn script_path() -> String { format!("{}\\content.js", steam_dir()) }
 
 // ── Logger ────────────────────────────────────────────────────────────────────
 
 use std::sync::Mutex;
-
 static LOG: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
 
 fn init_log() {
     let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
+        .create(true).append(true)
         .open(log_path())
         .expect("Failed to open backend.log");
     LOG.set(Mutex::new(file)).ok();
@@ -129,23 +123,319 @@ fn init_log() {
     log("DLL loaded");
     log(&format!("Steam dir:   {}", steam_dir()));
     log(&format!("System32:    {}", system32_dir()));
-    log(&format!("version.dll: {}", real_version_dll_path()));
+    log(&format!("Own path:    {}", own_path()));
     log(&format!("lua dir:     {}", lua_dir()));
     log(&format!("key file:    {}", key_path()));
-    log(&format!("log file:    {}", log_path()));
 }
 
 fn log(msg: &str) {
     use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     if let Some(f) = LOG.get() {
         if let Ok(mut f) = f.lock() {
             writeln!(f, "[{}] {}", ts, msg).ok();
         }
+    }
+}
+
+// ── SHA256 ────────────────────────────────────────────────────────────────────
+
+fn sha256_of_bytes(data: &[u8]) -> String {
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    format!("{:x}", hasher.finalize())
+}
+
+fn sha256_of_file(path: &str) -> Option<String> {
+    let data = std::fs::read(path).ok()?;
+    Some(sha256_of_bytes(&data))
+}
+
+
+fn github_latest_asset(repo: &str, asset_name: &str) -> Option<(String, String)> {
+    let api_url = format!("https://api.github.com/repos/{}/releases/latest", repo);
+    log(&format!("Checking GitHub latest for {} (asset: {})...", repo, asset_name));
+
+    let resp = ureq::get(&api_url)
+        .set("User-Agent", "steampluginback/1.0")
+        .set("Accept", "application/vnd.github+json")
+        .call().ok()?;
+
+    let body = resp.into_string().ok()?;
+
+
+    let tag = extract_json_str(&body, "tag_name")?;
+
+    let download_url = find_asset_url(&body, asset_name)?;
+
+    log(&format!("Latest tag: {}, url: {}", tag, download_url));
+    Some((tag, download_url))
+}
+
+fn extract_json_str(json: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{}\":", key);
+    let start = json.find(&needle)? + needle.len();
+    let rest = json[start..].trim_start();
+    if rest.starts_with('"') {
+        let rest = &rest[1..];
+        let end = rest.find('"')?;
+        Some(rest[..end].to_string())
+    } else {
+        None
+    }
+}
+
+fn find_asset_url(json: &str, asset_name: &str) -> Option<String> {
+    let mut search = json;
+    while let Some(pos) = search.find("\"name\"") {
+        let chunk = &search[pos..];
+        if let Some(name) = extract_json_str(chunk, "name") {
+            if name == asset_name {
+                let nearby = &chunk[..chunk.len().min(600)];
+                if let Some(url) = extract_json_str(nearby, "browser_download_url") {
+                    return Some(url);
+                }
+            }
+        }
+        search = &search[pos + 6..];
+    }
+    None
+}
+
+fn download_bytes(url: &str) -> Option<Vec<u8>> {
+    log(&format!("Downloading: {}", url));
+    let resp = ureq::get(url)
+        .set("User-Agent", "steampluginback/1.0")
+        .call().ok()?;
+    let mut buf = Vec::new();
+    resp.into_reader().read_to_end(&mut buf).ok()?;
+    log(&format!("Downloaded {} bytes", buf.len()));
+    Some(buf)
+}
+
+// ── Auto-update: CloudRedirectCLI ─────────────────────────────────────────────
+
+fn update_cloudredirect() {
+    log("=== CloudRedirect update check ===");
+    let exe_path = cloudredirect_exe_path();
+    let repo = "Selectively11/CloudRedirect";
+    let asset = "CloudRedirectCLI.exe";
+
+    let (_, download_url) = match github_latest_asset(repo, asset) {
+        Some(v) => v,
+        None => { log("WARN: Could not fetch CloudRedirect release info"); return; }
+    };
+
+    let needs_download = if std::path::Path::new(&exe_path).exists() {
+        log("CloudRedirectCLI.exe exists, checking SHA256...");
+        let remote_bytes = match download_bytes(&download_url) {
+            Some(b) => b,
+            None => { log("ERROR: Failed to download CloudRedirectCLI for comparison"); return; }
+        };
+        let remote_hash = sha256_of_bytes(&remote_bytes);
+        let local_hash = sha256_of_file(&exe_path).unwrap_or_default();
+        log(&format!("Local  SHA256: {}", local_hash));
+        log(&format!("Remote SHA256: {}", remote_hash));
+        if local_hash == remote_hash {
+            log("CloudRedirectCLI is up to date");
+            run_cloudredirect(&exe_path);
+            return;
+        }
+        log("SHA256 mismatch — updating...");
+        if let Err(e) = std::fs::write(&exe_path, &remote_bytes) {
+            log(&format!("ERROR: Failed to write CloudRedirectCLI.exe: {}", e));
+            return;
+        }
+        log("CloudRedirectCLI.exe updated");
+        false
+    } else {
+        log("CloudRedirectCLI.exe not found, downloading...");
+        true
+    };
+
+    if needs_download {
+        let bytes = match download_bytes(&download_url) {
+            Some(b) => b,
+            None => { log("ERROR: Failed to download CloudRedirectCLI.exe"); return; }
+        };
+        if let Err(e) = std::fs::write(&exe_path, &bytes) {
+            log(&format!("ERROR: Failed to write CloudRedirectCLI.exe: {}", e));
+            return;
+        }
+        log("CloudRedirectCLI.exe downloaded");
+    }
+
+    run_cloudredirect(&exe_path);
+}
+
+fn run_cloudredirect(exe_path: &str) {
+    log(&format!("Running: {} /stfixes", exe_path));
+    unsafe {
+        let mut exe_bytes: Vec<u8> = exe_path.bytes().collect();
+        exe_bytes.push(0);
+        let params = b"/stfixes\0";
+        let result = ShellExecuteA(
+            std::ptr::null_mut(),
+            b"open\0".as_ptr() as _,
+            exe_bytes.as_ptr() as _,
+            params.as_ptr() as _,
+            std::ptr::null(),
+            0,
+        );
+        if result as usize > 32 {
+            log("CloudRedirectCLI launched OK");
+        } else {
+            log(&format!("WARN: ShellExecuteA returned {:?} (may have failed)", result));
+        }
+    }
+}
+
+// ── Auto-update: version.dll (self) ──────────────────────────────────────────
+
+static DLL_UPDATE_PENDING: OnceLock<Mutex<bool>> = OnceLock::new();
+
+fn update_self() {
+    log("=== version.dll self-update check ===");
+    DLL_UPDATE_PENDING.set(Mutex::new(false)).ok();
+
+    let repo = "Peron4TheWin/steampluginback";
+    let asset = "version.dll";
+
+    let (_, download_url) = match github_latest_asset(repo, asset) {
+        Some(v) => v,
+        None => { log("WARN: Could not fetch version.dll release info"); return; }
+    };
+
+    let remote_bytes = match download_bytes(&download_url) {
+        Some(b) => b,
+        None => { log("ERROR: Failed to download latest version.dll"); return; }
+    };
+
+    let remote_hash = sha256_of_bytes(&remote_bytes);
+    let local_hash = sha256_of_file(own_path()).unwrap_or_default();
+
+    log(&format!("Local  SHA256: {}", local_hash));
+    log(&format!("Remote SHA256: {}", remote_hash));
+
+    if local_hash == remote_hash {
+        log("version.dll is up to date");
+        return;
+    }
+
+    log("version.dll update available — staging...");
+    let new_path = format!("{}\\version_new.dll", steam_dir());
+    if let Err(e) = std::fs::write(&new_path, &remote_bytes) {
+        log(&format!("ERROR: Failed to write version_new.dll: {}", e));
+        return;
+    }
+    log(&format!("Saved new DLL to: {}", new_path));
+
+
+    let own = own_path().replace('\\', "\\\\");
+    let new = new_path.replace('\\', "\\\\");
+    let steam_exe = format!("{}\\steam.exe", steam_dir()).replace('\\', "\\\\");
+
+    let ps_script = format!(r#"
+$steamExe = "{steam_exe}"
+$src = "{new}"
+$dst = "{own}"
+
+Write-Host "Waiting for Steam to exit..."
+while (Get-Process -Name "steam" -ErrorAction SilentlyContinue) {{
+    Start-Sleep -Milliseconds 500
+}}
+
+Start-Sleep -Milliseconds 500
+
+Move-Item -Force $src $dst
+Write-Host "version.dll updated"
+
+Start-Process $steamExe
+Write-Host "Steam relaunched"
+"#, steam_exe = steam_exe, new = new, own = own);
+
+    let ps_path = format!("{}\\update_dll.ps1", steam_dir());
+    if let Err(e) = std::fs::write(&ps_path, &ps_script) {
+        log(&format!("ERROR: Failed to write update_dll.ps1: {}", e));
+        return;
+    }
+    log(&format!("PowerShell script saved to: {}", ps_path));
+
+    unsafe {
+        let mut cmd = format!(
+            "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{}\"\0",
+            ps_path
+        );
+        ShellExecuteA(
+            std::ptr::null_mut(),
+            b"open\0".as_ptr() as _,
+            b"powershell.exe\0".as_ptr() as _,
+            format!("-ExecutionPolicy Bypass -WindowStyle Hidden -File \"{}\"\0", ps_path).as_ptr() as _,
+            std::ptr::null(),
+            0,
+        );
+    }
+    log("PowerShell updater launched — killing Steam...");
+
+    std::process::Command::new("taskkill")
+        .args(["/F", "/IM", "steam.exe"])
+        .spawn()
+        .ok();
+
+    log("Steam kill signal sent — updater will relaunch it");
+
+    if let Some(flag) = DLL_UPDATE_PENDING.get() {
+        if let Ok(mut f) = flag.lock() { *f = true; }
+    }
+}
+
+fn dll_update_pending() -> bool {
+    DLL_UPDATE_PENDING.get()
+        .and_then(|m| m.lock().ok())
+        .map(|f| *f)
+        .unwrap_or(false)
+}
+
+// ── Auto-update: content.js (front script) ───────────────────────────────────
+
+fn update_script() {
+    log("=== content.js update check ===");
+    let url = "https://raw.githubusercontent.com/Peron4TheWin/steampluginfront/refs/heads/master/content/content.js";
+    let local_path = script_path();
+
+    let resp = match ureq::get(url)
+        .set("User-Agent", "steampluginback/1.0")
+        .call()
+    {
+        Ok(r) => r,
+        Err(e) => { log(&format!("WARN: Failed to fetch content.js ({}), using cached", e)); return; }
+    };
+
+    if resp.status() != 200 {
+        log(&format!("WARN: content.js fetch returned {} — keeping local", resp.status()));
+        return;
+    }
+
+    let mut remote_bytes = Vec::new();
+    if resp.into_reader().read_to_end(&mut remote_bytes).is_err() {
+        log("ERROR: Failed to read content.js response body");
+        return;
+    }
+
+    let remote_hash = sha256_of_bytes(&remote_bytes);
+    let local_hash = sha256_of_file(&local_path).unwrap_or_default();
+
+    if local_hash == remote_hash {
+        log("content.js is up to date");
+        return;
+    }
+
+    log("content.js changed — updating local cache...");
+    match std::fs::write(&local_path, &remote_bytes) {
+        Ok(_) => log(&format!("content.js saved to {}", local_path)),
+        Err(e) => log(&format!("ERROR: Failed to write content.js: {}", e)),
     }
 }
 
@@ -155,7 +445,6 @@ fn load_real_version() {
     unsafe {
         let path = real_version_dll_path();
         log(&format!("Loading real version.dll from {}...", path));
-
         let mut path_bytes: Vec<u8> = path.bytes().collect();
         path_bytes.push(0);
         let lib = LoadLibraryA(path_bytes.as_ptr() as _);
@@ -168,7 +457,7 @@ fn load_real_version() {
             ($name:ident) => {{
                 let ptr = GetProcAddress(lib, concat!(stringify!($name), "\0").as_ptr() as _);
                 if ptr.is_null() {
-                    log(&format!("WARN: GetProcAddress returned null for {}", stringify!($name)));
+                    log(&format!("WARN: GetProcAddress null for {}", stringify!($name)));
                 }
                 std::mem::transmute(ptr)
             }};
@@ -204,9 +493,16 @@ pub extern "system" fn DllMain(hmodule: *mut u8, reason: u32, _reserved: *mut u8
             init_log();
             load_real_version();
             init_api_key();
-            log("Spawning server thread...");
+            log("Spawning worker threads...");
+            thread::spawn(|| {
+                // Auto-updates al arrancar
+                update_cloudredirect();
+                update_self();
+                update_script();
+            });
             thread::spawn(|| run_server());
         }
+        0 => log("DLL_PROCESS_DETACH"),
         _ => {}
     }
     1
@@ -222,24 +518,17 @@ static API_KEY: OnceLock<RwLock<String>> = OnceLock::new();
 
 fn init_api_key() {
     let path = key_path();
-    log(&format!("Initializing API key from '{}'...", path));
-
+    log(&format!("Loading API key from '{}'", path));
     if !Path::new(&path).exists() {
-        log("key.txt not found, creating empty file");
+        log("key.txt not found, creating empty");
         fs::write(&path, "").expect("Failed to create key.txt");
     }
-
-    let key = fs::read_to_string(&path)
-        .expect("Failed to read key.txt")
-        .trim()
-        .to_string();
-
+    let key = fs::read_to_string(&path).expect("Failed to read key.txt").trim().to_string();
     if key.is_empty() {
-        log("WARN: key.txt is empty — API key not set");
+        log("WARN: key.txt is empty");
     } else {
         log(&format!("API key loaded ({}...)", &key[..key.len().min(8)]));
     }
-
     API_KEY.set(RwLock::new(key)).ok();
 }
 
@@ -249,12 +538,15 @@ fn get_api_key() -> String {
 
 fn set_api_key(new_key: String) {
     log(&format!("Updating API key ({}...)", &new_key[..new_key.len().min(8)]));
-    {
-        let mut key = API_KEY.get().unwrap().write().unwrap();
-        *key = new_key.clone();
-    }
+    { *API_KEY.get().unwrap().write().unwrap() = new_key.clone(); }
     fs::write(key_path(), new_key).expect("Failed to save key");
-    log("API key saved to key.txt");
+    log("API key saved");
+}
+
+// ── CORS header helper ────────────────────────────────────────────────────────
+
+fn cors_header() -> Header {
+    Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap()
 }
 
 // ── Server ────────────────────────────────────────────────────────────────────
@@ -263,7 +555,7 @@ fn run_server() {
     log("Starting HTTP server on 127.0.0.1:3000...");
     let server = match Server::http("127.0.0.1:3000") {
         Ok(s) => { log("Server listening on 127.0.0.1:3000"); s }
-        Err(e) => { log(&format!("ERROR: Failed to bind server: {}", e)); return; }
+        Err(e) => { log(&format!("ERROR: Failed to bind: {}", e)); return; }
     };
 
     for mut request in server.incoming_requests() {
@@ -271,43 +563,89 @@ fn run_server() {
         let url = request.url().to_string();
         log(&format!("--> {} {}", method, url));
 
+        if method == "GET" && url.trim_start_matches('/') == "script" {
+            thread::spawn(|| update_script());
+
+            let local = script_path();
+            match std::fs::read(&local) {
+                Ok(bytes) => {
+                    let response = Response::from_data(bytes)
+                        .with_header(cors_header())
+                        .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/javascript"[..]).unwrap());
+                    request.respond(response).ok();
+                    log("<-- 200 /script (served from cache)");
+                }
+                Err(_) => {
+                    log("WARN: No local content.js, fetching synchronously...");
+                    update_script();
+                    match std::fs::read(&local) {
+                        Ok(bytes) => {
+                            let response = Response::from_data(bytes)
+                                .with_header(cors_header())
+                                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/javascript"[..]).unwrap());
+                            request.respond(response).ok();
+                            log("<-- 200 /script (first fetch)");
+                        }
+                        Err(_) => {
+                            request.respond(Response::from_string("Script not available").with_status_code(503).with_header(cors_header())).ok();
+                            log("<-- 503 /script (unavailable)");
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        if method == "GET" && url.trim_start_matches('/') == "status" {
+            let update_pending = dll_update_pending();
+            let body = format!(
+                "{{\"update_pending\":{},\"key_set\":{}}}",
+                update_pending,
+                !get_api_key().is_empty()
+            );
+            let response = Response::from_string(body)
+                .with_header(cors_header())
+                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            request.respond(response).ok();
+            log(&format!("<-- 200 /status (update_pending={})", update_pending));
+            continue;
+        }
+
         if method != "POST" {
-            log(&format!("405 Method Not Allowed ({})", method));
+            log(&format!("405 Method Not Allowed"));
             request.respond(Response::from_string("Method Not Allowed").with_status_code(405)).ok();
             continue;
         }
 
-        // POST /key
-        if url.contains("key") {
-            log("Handling /key — reading body...");
+        if url.trim_start_matches('/') == "key" {
             let mut body = String::new();
             if request.as_reader().read_to_string(&mut body).is_err() {
-                log("ERROR: Failed to read request body for /key");
+                log("ERROR: Failed to read /key body");
                 request.respond(Response::from_string("Failed to read body").with_status_code(400)).ok();
                 continue;
             }
             let key = body.trim().to_string();
-            log(&format!("Validating key against hubcapmanifest ({}...)", &key[..key.len().min(8)]));
+            log(&format!("Validating key ({}...)", &key[..key.len().min(8)]));
 
             match ureq::get("https://hubcapmanifest.com/api/v1/user/stats")
                 .set("Authorization", &format!("Bearer {}", key))
                 .call()
             {
                 Ok(_) => {
-                    log("Key validation OK");
+                    log("Key OK");
                     set_api_key(key);
-                    request.respond(Response::from_string("OK").with_status_code(200)).ok();
-                    log("<-- 200 OK /key");
+                    request.respond(Response::from_string("OK").with_status_code(200).with_header(cors_header())).ok();
+                    log("<-- 200 /key");
                 }
                 Err(ureq::Error::Status(401, resp)) => {
                     let msg = resp.into_string().unwrap_or_else(|_| "Unauthorized".to_string());
-                    log(&format!("Key validation failed 401: {}", msg));
-                    request.respond(Response::from_string(msg).with_status_code(401)).ok();
+                    log(&format!("Key invalid 401: {}", msg));
+                    request.respond(Response::from_string(msg).with_status_code(401).with_header(cors_header())).ok();
                     log("<-- 401 /key");
                 }
                 Err(err) => {
-                    log(&format!("Key validation error: {}", err));
-                    request.respond(Response::from_string(format!("API error: {}", err)).with_status_code(500)).ok();
+                    log(&format!("Key error: {}", err));
+                    request.respond(Response::from_string(format!("API error: {}", err)).with_status_code(500).with_header(cors_header())).ok();
                     log("<-- 500 /key");
                 }
             }
@@ -316,57 +654,44 @@ fn run_server() {
 
         // POST /<appid>
         let appid = url.trim_start_matches('/').to_string();
-        log(&format!("Handling appid: {}", appid));
+        log(&format!("Fetching lua for appid: {}", appid));
 
         let mut _body = String::new();
         request.as_reader().read_to_string(&mut _body).ok();
 
         let fetch_url = format!("https://hubcapmanifest.com/api/v1/lua/{}", appid);
-        log(&format!("Fetching: {}", fetch_url));
+        log(&format!("GET {}", fetch_url));
 
-        let result = ureq::get(&fetch_url)
+        match ureq::get(&fetch_url)
             .set("Authorization", &format!("Bearer {}", get_api_key()))
-            .call();
-
-        match result {
+            .call()
+        {
             Ok(resp) => {
                 let status = resp.status();
-                log(&format!("hubcapmanifest responded {}", status));
+                log(&format!("hubcapmanifest -> {}", status));
                 let mut buf = Vec::new();
                 resp.into_reader().read_to_end(&mut buf).ok();
                 log(&format!("Received {} bytes", buf.len()));
 
                 let dir = lua_dir();
-                if let Err(e) = std::fs::create_dir_all(&dir) {
-                    log(&format!("WARN: Failed to create lua dir {}: {}", dir, e));
-                }
-
+                std::fs::create_dir_all(&dir).ok();
                 let path = format!("{}\\{}.lua", dir, appid);
                 match std::fs::write(&path, &buf) {
                     Ok(_) => log(&format!("Saved: {}", path)),
-                    Err(e) => log(&format!("ERROR: Failed to write {}: {}", path, e)),
+                    Err(e) => log(&format!("ERROR writing {}: {}", path, e)),
                 }
-
-                let response = Response::from_string("OK")
-                    .with_header(Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
-                request.respond(response).ok();
+                request.respond(Response::from_string("OK").with_header(cors_header())).ok();
                 log("<-- 200 OK");
             }
             Err(ureq::Error::Status(code, resp)) => {
                 let msg = resp.into_string().unwrap_or_default();
-                log(&format!("ERROR: hubcapmanifest returned {}: {}", code, msg));
-                let response = Response::from_string(msg)
-                    .with_status_code(code)
-                    .with_header(Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
-                request.respond(response).ok();
+                log(&format!("ERROR: {} {}", code, msg));
+                request.respond(Response::from_string(msg).with_status_code(code).with_header(cors_header())).ok();
                 log(&format!("<-- {}", code));
             }
             Err(err) => {
-                log(&format!("ERROR: ureq error: {}", err));
-                let response = Response::from_string(err.to_string())
-                    .with_status_code(500)
-                    .with_header(Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
-                request.respond(response).ok();
+                log(&format!("ERROR: {}", err));
+                request.respond(Response::from_string(err.to_string()).with_status_code(500).with_header(cors_header())).ok();
                 log("<-- 500");
             }
         }
@@ -375,45 +700,17 @@ fn run_server() {
 
 // ── Exports ───────────────────────────────────────────────────────────────────
 
-#[no_mangle] pub unsafe extern "system" fn GetFileVersionInfoA(a: *const i8, b: u32, c: u32, d: *mut u8) -> i32 {
-    (REAL.get().unwrap().GetFileVersionInfoA)(a, b, c, d)
-}
-#[no_mangle] pub unsafe extern "system" fn GetFileVersionInfoW(a: *const u16, b: u32, c: u32, d: *mut u8) -> i32 {
-    (REAL.get().unwrap().GetFileVersionInfoW)(a, b, c, d)
-}
-#[no_mangle] pub unsafe extern "system" fn GetFileVersionInfoSizeA(a: *const i8, b: *mut u32) -> u32 {
-    (REAL.get().unwrap().GetFileVersionInfoSizeA)(a, b)
-}
-#[no_mangle] pub unsafe extern "system" fn GetFileVersionInfoSizeW(a: *const u16, b: *mut u32) -> u32 {
-    (REAL.get().unwrap().GetFileVersionInfoSizeW)(a, b)
-}
-#[no_mangle] pub unsafe extern "system" fn GetFileVersionInfoSizeExW(a: u32, b: *const u16, c: *mut u32) -> u32 {
-    (REAL.get().unwrap().GetFileVersionInfoSizeExW)(a, b, c)
-}
-#[no_mangle] pub unsafe extern "system" fn GetFileVersionInfoExW(a: u32, b: *const u16, c: u32, d: u32, e: *mut u8) -> i32 {
-    (REAL.get().unwrap().GetFileVersionInfoExW)(a, b, c, d, e)
-}
-#[no_mangle] pub unsafe extern "system" fn VerFindFileA(a: u32, b: *const i8, c: *const i8, d: *const i8, e: *mut i8, f: *mut u32, g: *mut i8, h: *mut u32) -> u32 {
-    (REAL.get().unwrap().VerFindFileA)(a, b, c, d, e, f, g, h)
-}
-#[no_mangle] pub unsafe extern "system" fn VerFindFileW(a: u32, b: *const u16, c: *const u16, d: *const u16, e: *mut u16, f: *mut u32, g: *mut u16, h: *mut u32) -> u32 {
-    (REAL.get().unwrap().VerFindFileW)(a, b, c, d, e, f, g, h)
-}
-#[no_mangle] pub unsafe extern "system" fn VerInstallFileA(a: u32, b: *const i8, c: *const i8, d: *const i8, e: *const i8, f: *const i8, g: *mut i8, h: *mut u32) -> u32 {
-    (REAL.get().unwrap().VerInstallFileA)(a, b, c, d, e, f, g, h)
-}
-#[no_mangle] pub unsafe extern "system" fn VerInstallFileW(a: u32, b: *const u16, c: *const u16, d: *const u16, e: *const u16, f: *const u16, g: *mut u16, h: *mut u32) -> u32 {
-    (REAL.get().unwrap().VerInstallFileW)(a, b, c, d, e, f, g, h)
-}
-#[no_mangle] pub unsafe extern "system" fn VerLanguageNameA(a: u32, b: *mut i8, c: u32) -> u32 {
-    (REAL.get().unwrap().VerLanguageNameA)(a, b, c)
-}
-#[no_mangle] pub unsafe extern "system" fn VerLanguageNameW(a: u32, b: *mut u16, c: u32) -> u32 {
-    (REAL.get().unwrap().VerLanguageNameW)(a, b, c)
-}
-#[no_mangle] pub unsafe extern "system" fn VerQueryValueA(a: *const u8, b: *const i8, c: *mut *mut u8, d: *mut u32) -> i32 {
-    (REAL.get().unwrap().VerQueryValueA)(a, b, c, d)
-}
-#[no_mangle] pub unsafe extern "system" fn VerQueryValueW(a: *const u8, b: *const u16, c: *mut *mut u8, d: *mut u32) -> i32 {
-    (REAL.get().unwrap().VerQueryValueW)(a, b, c, d)
-}
+#[no_mangle] pub unsafe extern "system" fn GetFileVersionInfoA(a: *const i8, b: u32, c: u32, d: *mut u8) -> i32 { (REAL.get().unwrap().GetFileVersionInfoA)(a, b, c, d) }
+#[no_mangle] pub unsafe extern "system" fn GetFileVersionInfoW(a: *const u16, b: u32, c: u32, d: *mut u8) -> i32 { (REAL.get().unwrap().GetFileVersionInfoW)(a, b, c, d) }
+#[no_mangle] pub unsafe extern "system" fn GetFileVersionInfoSizeA(a: *const i8, b: *mut u32) -> u32 { (REAL.get().unwrap().GetFileVersionInfoSizeA)(a, b) }
+#[no_mangle] pub unsafe extern "system" fn GetFileVersionInfoSizeW(a: *const u16, b: *mut u32) -> u32 { (REAL.get().unwrap().GetFileVersionInfoSizeW)(a, b) }
+#[no_mangle] pub unsafe extern "system" fn GetFileVersionInfoSizeExW(a: u32, b: *const u16, c: *mut u32) -> u32 { (REAL.get().unwrap().GetFileVersionInfoSizeExW)(a, b, c) }
+#[no_mangle] pub unsafe extern "system" fn GetFileVersionInfoExW(a: u32, b: *const u16, c: u32, d: u32, e: *mut u8) -> i32 { (REAL.get().unwrap().GetFileVersionInfoExW)(a, b, c, d, e) }
+#[no_mangle] pub unsafe extern "system" fn VerFindFileA(a: u32, b: *const i8, c: *const i8, d: *const i8, e: *mut i8, f: *mut u32, g: *mut i8, h: *mut u32) -> u32 { (REAL.get().unwrap().VerFindFileA)(a, b, c, d, e, f, g, h) }
+#[no_mangle] pub unsafe extern "system" fn VerFindFileW(a: u32, b: *const u16, c: *const u16, d: *const u16, e: *mut u16, f: *mut u32, g: *mut u16, h: *mut u32) -> u32 { (REAL.get().unwrap().VerFindFileW)(a, b, c, d, e, f, g, h) }
+#[no_mangle] pub unsafe extern "system" fn VerInstallFileA(a: u32, b: *const i8, c: *const i8, d: *const i8, e: *const i8, f: *const i8, g: *mut i8, h: *mut u32) -> u32 { (REAL.get().unwrap().VerInstallFileA)(a, b, c, d, e, f, g, h) }
+#[no_mangle] pub unsafe extern "system" fn VerInstallFileW(a: u32, b: *const u16, c: *const u16, d: *const u16, e: *const u16, f: *const u16, g: *mut u16, h: *mut u32) -> u32 { (REAL.get().unwrap().VerInstallFileW)(a, b, c, d, e, f, g, h) }
+#[no_mangle] pub unsafe extern "system" fn VerLanguageNameA(a: u32, b: *mut i8, c: u32) -> u32 { (REAL.get().unwrap().VerLanguageNameA)(a, b, c) }
+#[no_mangle] pub unsafe extern "system" fn VerLanguageNameW(a: u32, b: *mut u16, c: u32) -> u32 { (REAL.get().unwrap().VerLanguageNameW)(a, b, c) }
+#[no_mangle] pub unsafe extern "system" fn VerQueryValueA(a: *const u8, b: *const i8, c: *mut *mut u8, d: *mut u32) -> i32 { (REAL.get().unwrap().VerQueryValueA)(a, b, c, d) }
+#[no_mangle] pub unsafe extern "system" fn VerQueryValueW(a: *const u8, b: *const u16, c: *mut *mut u8, d: *mut u32) -> i32 { (REAL.get().unwrap().VerQueryValueW)(a, b, c, d) }
