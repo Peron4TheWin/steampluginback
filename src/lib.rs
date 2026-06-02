@@ -80,6 +80,7 @@ fn load_real_version() {
 pub extern "system" fn DllMain(_hmodule: *mut u8, reason: u32, _reserved: *mut u8) -> i32 {
     if reason == 1 {
         load_real_version();
+        init_api_key();
         thread::spawn(|| run_server());
     }
     1
@@ -155,7 +156,7 @@ fn run_server() {
                 .set("Authorization", &format!("Bearer {}", key))
                 .call()
             {
-                Ok(response) => {
+                Ok(_) => {
                     set_api_key(key.to_string());
                     request
                         .respond(Response::from_string("OK").with_status_code(200))
