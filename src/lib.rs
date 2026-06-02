@@ -2,7 +2,6 @@ use std::thread;
 use std::sync::OnceLock;
 use std::io::Read;
 use tiny_http::{Server, Response, Header};
-//cache test upload
 type FnGetFileVersionInfoA = unsafe extern "system" fn(*const i8, u32, u32, *mut u8) -> i32;
 type FnGetFileVersionInfoW = unsafe extern "system" fn(*const u16, u32, u32, *mut u8) -> i32;
 type FnGetFileVersionInfoSizeA = unsafe extern "system" fn(*const i8, *mut u32) -> u32;
