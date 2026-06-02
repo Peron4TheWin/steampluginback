@@ -209,16 +209,17 @@ fn run_server() {
 
                 request.respond(response).ok();
             }
-            Err(_) => {
-                let response = Response::from_string(result.unwrap_err().to_string())
+            Err(ureq::Error::Status(code, resp)) => {
+                let msg = resp.into_string().unwrap_or_default();
+                let response = Response::from_string(msg)
+                    .with_status_code(code)
+                    .with_header(Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
+                request.respond(response).ok();
+            }
+            Err(err) => {
+                let response = Response::from_string(err.to_string())
                     .with_status_code(500)
-                    .with_header(
-                        Header::from_bytes(
-                            &b"Access-Control-Allow-Origin"[..],
-                            &b"*"[..]
-                        ).unwrap()
-                    );
-
+                    .with_header(Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
                 request.respond(response).ok();
             }
         }
