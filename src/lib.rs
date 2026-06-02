@@ -563,7 +563,7 @@ fn run_server() {
         log(&format!("--> {} {}", method, url));
 
         // GET /script
-        if method == "GET" && url.trim_start_matches('/') == "script" {
+        if method == "GET" && url.trim_start_matches('/').starts_with("script"){
             thread::spawn(|| update_script());
             let local = script_path();
             match std::fs::read(&local) {
