@@ -566,7 +566,8 @@ fn run_server() {
         let url = request.url().to_string();
         log(&format!("--> {} {}", method, url));
 
-        if method == "GET" && url.trim_start_matches('/') == "script" {
+        if method == "GET" && url.trim_start_matches('/').starts_with("script")
+        {
             thread::spawn(|| update_script());
 
             let local = script_path();
