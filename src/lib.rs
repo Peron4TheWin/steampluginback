@@ -85,8 +85,50 @@ pub extern "system" fn DllMain(_hmodule: *mut u8, reason: u32, _reserved: *mut u
     1
 }
 
-const API: &str = "smm_d8fe692dbab56b5e2be19422cf57a5fe242129b4920cc0fed2bf22e37cc6f2039c87a84f6b07054b19a12618214decf2";
-const LUA_DIR: &str = "C:\\Program Files (x86)\\Steam\\config\\lua";
+use std::fs;
+use std::path::Path;
+use std::sync::{RwLock};
+
+static API_KEY: OnceLock<RwLock<String>> = OnceLock::new();
+
+fn init_api_key() {
+    let path = "key.txt";
+
+    if !Path::new(path).exists() {
+        fs::write(path, "").expect("Failed to create key.txt");
+    }
+
+    let key = fs::read_to_string(path)
+        .expect("Failed to read key.txt")
+        .trim()
+        .to_string();
+
+    API_KEY.set(RwLock::new(key)).ok();
+}
+
+fn get_api_key() -> String {
+    API_KEY
+        .get()
+        .unwrap()
+        .read()
+        .unwrap()
+        .clone()
+}
+
+fn set_api_key(new_key: String) {
+    {
+        let mut key = API_KEY
+            .get()
+            .unwrap()
+            .write()
+            .unwrap();
+
+        *key = new_key.clone();
+    }
+
+    fs::write("key.txt", new_key).expect("Failed to save key");
+}
+const LUA_DIR: &str = "C:\\Program Files (x86)\\Steam\\config\\stplug-in";
 
 fn run_server() {
     let server = match Server::http("127.0.0.1:3000") {
@@ -99,6 +141,45 @@ fn run_server() {
             request.respond(Response::from_string("Method Not Allowed").with_status_code(405)).ok();
             continue;
         }
+        if request.url().contains("key") {
+            let mut body = String::new();
+            if request.as_reader().read_to_string(&mut body).is_err() {
+                request
+                    .respond(Response::from_string("Failed to read body").with_status_code(400))
+                    .ok();
+                continue;
+            }
+            let key = body.trim();
+
+            match ureq::get("https://hubcapmanifest.com/api/v1/user/stats")
+                .set("Authorization", &format!("Bearer {}", key))
+                .call()
+            {
+                Ok(response) => {
+                    set_api_key(key.to_string());
+                    request
+                        .respond(Response::from_string("OK").with_status_code(200))
+                        .ok();
+                }
+                Err(ureq::Error::Status(401, response)) => {
+                    let msg = response
+                        .into_string()
+                        .unwrap_or_else(|_| "Unauthorized".to_string());
+                    request
+                        .respond(Response::from_string(msg).with_status_code(401))
+                        .ok();
+                }
+                Err(err) => {
+                    request
+                        .respond(
+                            Response::from_string(format!("API error: {}", err))
+                                .with_status_code(500),
+                        )
+                        .ok();
+                }
+            }
+            continue;
+        }
 
         let appid = request.url().trim_start_matches('/').to_string();
 
@@ -107,7 +188,7 @@ fn run_server() {
 
         let url = format!("https://hubcapmanifest.com/api/v1/lua/{}", appid);
         let result = ureq::get(&url)
-            .set("Authorization", &format!("Bearer {}", API))
+            .set("Authorization", &format!("Bearer {}", get_api_key()))
             .call();
 
         match result {
