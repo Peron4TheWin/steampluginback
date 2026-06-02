@@ -1,6 +1,8 @@
 use std::thread;
 use std::sync::OnceLock;
 use std::io::Read;
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
 use tiny_http::{Server, Response, Header};
 
 type FnGetFileVersionInfoA = unsafe extern "system" fn(*const i8, u32, u32, *mut u8) -> i32;
@@ -43,6 +45,71 @@ static REAL: OnceLock<VersionFns> = OnceLock::new();
 extern "system" {
     fn LoadLibraryA(name: *const i8) -> *mut u8;
     fn GetProcAddress(module: *mut u8, name: *const i8) -> *mut u8;
+    fn GetModuleFileNameW(hmodule: *mut u8, filename: *mut u16, size: u32) -> u32;
+    fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+}
+
+// ── Paths ─────────────────────────────────────────────────────────────────────
+
+static STEAM_DIR: OnceLock<String> = OnceLock::new();
+static SYSTEM32_DIR: OnceLock<String> = OnceLock::new();
+
+fn init_paths(hmodule: *mut u8) {
+    unsafe {
+        // System32 dinámico via GetSystemDirectoryW
+        let mut sys_buf = vec![0u16; 260];
+        let sys_len = GetSystemDirectoryW(sys_buf.as_mut_ptr(), 260);
+        let system32 = if sys_len > 0 {
+            sys_buf.truncate(sys_len as usize);
+            OsString::from_wide(&sys_buf).to_string_lossy().to_string()
+        } else {
+            // fallback usando variable de entorno
+            std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string())
+                + "\\System32"
+        };
+        SYSTEM32_DIR.set(system32).ok();
+
+        // Steam dir: path de esta DLL sin el filename
+        let mut dll_buf = vec![0u16; 260];
+        let dll_len = GetModuleFileNameW(hmodule, dll_buf.as_mut_ptr(), 260);
+        let steam_dir = if dll_len > 0 {
+            dll_buf.truncate(dll_len as usize);
+            let full = OsString::from_wide(&dll_buf).to_string_lossy().to_string();
+            full.rfind('\\')
+                .map(|i| full[..i].to_string())
+                .unwrap_or_else(|| ".".to_string())
+        } else {
+            // fallback: directorio de trabajo actual
+            std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| ".".to_string())
+        };
+        STEAM_DIR.set(steam_dir).ok();
+    }
+}
+
+fn steam_dir() -> &'static str {
+    STEAM_DIR.get().map(|s| s.as_str()).unwrap_or(".")
+}
+
+fn system32_dir() -> &'static str {
+    SYSTEM32_DIR.get().map(|s| s.as_str()).unwrap_or("C:\\Windows\\System32")
+}
+
+fn lua_dir() -> String {
+    format!("{}\\config\\stplug-in", steam_dir())
+}
+
+fn key_path() -> String {
+    format!("{}\\key.txt", steam_dir())
+}
+
+fn log_path() -> String {
+    format!("{}\\backend.log", steam_dir())
+}
+
+fn real_version_dll_path() -> String {
+    format!("{}\\version.dll", system32_dir())
 }
 
 // ── Logger ────────────────────────────────────────────────────────────────────
@@ -55,11 +122,17 @@ fn init_log() {
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("backend.log")
+        .open(log_path())
         .expect("Failed to open backend.log");
     LOG.set(Mutex::new(file)).ok();
     log("============================================================");
     log("DLL loaded");
+    log(&format!("Steam dir:   {}", steam_dir()));
+    log(&format!("System32:    {}", system32_dir()));
+    log(&format!("version.dll: {}", real_version_dll_path()));
+    log(&format!("lua dir:     {}", lua_dir()));
+    log(&format!("key file:    {}", key_path()));
+    log(&format!("log file:    {}", log_path()));
 }
 
 fn log(msg: &str) {
@@ -69,7 +142,6 @@ fn log(msg: &str) {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    // ts a formato legible: no tenemos chrono, usamos segundos epoch igual
     if let Some(f) = LOG.get() {
         if let Ok(mut f) = f.lock() {
             writeln!(f, "[{}] {}", ts, msg).ok();
@@ -81,10 +153,14 @@ fn log(msg: &str) {
 
 fn load_real_version() {
     unsafe {
-        log("Loading real version.dll from System32...");
-        let lib = LoadLibraryA(b"C:\\Windows\\System32\\version.dll\0".as_ptr() as _);
+        let path = real_version_dll_path();
+        log(&format!("Loading real version.dll from {}...", path));
+
+        let mut path_bytes: Vec<u8> = path.bytes().collect();
+        path_bytes.push(0);
+        let lib = LoadLibraryA(path_bytes.as_ptr() as _);
         if lib.is_null() {
-            log("ERROR: Failed to load System32\\version.dll");
+            log("ERROR: Failed to load real version.dll");
             return;
         }
 
@@ -121,9 +197,10 @@ fn load_real_version() {
 // ── DllMain ───────────────────────────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "system" fn DllMain(_hmodule: *mut u8, reason: u32, _reserved: *mut u8) -> i32 {
+pub extern "system" fn DllMain(hmodule: *mut u8, reason: u32, _reserved: *mut u8) -> i32 {
     match reason {
         1 => {
+            init_paths(hmodule);
             init_log();
             load_real_version();
             init_api_key();
@@ -144,15 +221,15 @@ use std::sync::RwLock;
 static API_KEY: OnceLock<RwLock<String>> = OnceLock::new();
 
 fn init_api_key() {
-    let path = "key.txt";
+    let path = key_path();
     log(&format!("Initializing API key from '{}'...", path));
 
-    if !Path::new(path).exists() {
+    if !Path::new(&path).exists() {
         log("key.txt not found, creating empty file");
-        fs::write(path, "").expect("Failed to create key.txt");
+        fs::write(&path, "").expect("Failed to create key.txt");
     }
 
-    let key = fs::read_to_string(path)
+    let key = fs::read_to_string(&path)
         .expect("Failed to read key.txt")
         .trim()
         .to_string();
@@ -176,13 +253,11 @@ fn set_api_key(new_key: String) {
         let mut key = API_KEY.get().unwrap().write().unwrap();
         *key = new_key.clone();
     }
-    fs::write("key.txt", new_key).expect("Failed to save key");
+    fs::write(key_path(), new_key).expect("Failed to save key");
     log("API key saved to key.txt");
 }
 
 // ── Server ────────────────────────────────────────────────────────────────────
-
-const LUA_DIR: &str = "C:\\Program Files (x86)\\Steam\\config\\stplug-in";
 
 fn run_server() {
     log("Starting HTTP server on 127.0.0.1:3000...");
@@ -211,7 +286,7 @@ fn run_server() {
                 request.respond(Response::from_string("Failed to read body").with_status_code(400)).ok();
                 continue;
             }
-            let key = body.trim();
+            let key = body.trim().to_string();
             log(&format!("Validating key against hubcapmanifest ({}...)", &key[..key.len().min(8)]));
 
             match ureq::get("https://hubcapmanifest.com/api/v1/user/stats")
@@ -220,7 +295,7 @@ fn run_server() {
             {
                 Ok(_) => {
                     log("Key validation OK");
-                    set_api_key(key.to_string());
+                    set_api_key(key);
                     request.respond(Response::from_string("OK").with_status_code(200)).ok();
                     log("<-- 200 OK /key");
                 }
@@ -261,11 +336,12 @@ fn run_server() {
                 resp.into_reader().read_to_end(&mut buf).ok();
                 log(&format!("Received {} bytes", buf.len()));
 
-                if let Err(e) = std::fs::create_dir_all(LUA_DIR) {
-                    log(&format!("WARN: Failed to create LUA_DIR: {}", e));
+                let dir = lua_dir();
+                if let Err(e) = std::fs::create_dir_all(&dir) {
+                    log(&format!("WARN: Failed to create lua dir {}: {}", dir, e));
                 }
 
-                let path = format!("{}\\{}.lua", LUA_DIR, appid);
+                let path = format!("{}\\{}.lua", dir, appid);
                 match std::fs::write(&path, &buf) {
                     Ok(_) => log(&format!("Saved: {}", path)),
                     Err(e) => log(&format!("ERROR: Failed to write {}: {}", path, e)),
