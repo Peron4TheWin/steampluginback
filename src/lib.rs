@@ -51,6 +51,9 @@ extern "system" {
     fn ShellExecuteA(hwnd: *mut u8, op: *const i8, file: *const i8, params: *const i8, dir: *const i8, show: i32) -> *mut u8;
 }
 
+#[link(name = "shell32")]
+unsafe extern "system" {}
+
 const MOVEFILE_DELAY_UNTIL_REBOOT: u32 = 4;
 const MOVEFILE_REPLACE_EXISTING: u32 = 1;
 
