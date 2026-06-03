@@ -4,6 +4,9 @@ use std::io::Read;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use tiny_http::{Server, Response, Header};
+use std::fs;
+use std::path::Path;
+use std::sync::RwLock;
 
 type FnGetFileVersionInfoA = unsafe extern "system" fn(*const i8, u32, u32, *mut u8) -> i32;
 type FnGetFileVersionInfoW = unsafe extern "system" fn(*const u16, u32, u32, *mut u8) -> i32;
@@ -90,7 +93,6 @@ fn lua_dir() -> String { format!("{}\\config\\stplug-in", steam_dir()) }
 fn key_path() -> String { format!("{}\\key.txt", steam_dir()) }
 fn log_path() -> String { format!("{}\\backend.log", steam_dir()) }
 fn real_version_dll_path() -> String { format!("{}\\version.dll", system32_dir()) }
-fn updater_path() -> String { format!("{}\\updater.ps1", steam_dir()) }
 
 // ── Logger ────────────────────────────────────────────────────────────────────
 
@@ -181,7 +183,6 @@ pub extern "system" fn DllMain(hmodule: *mut u8, reason: u32, _reserved: *mut u8
 
             if is_primary_process() {
                 log("Primary process — starting server and updater");
-                launch_updater();
                 thread::spawn(|| run_server());
             } else {
                 log("Secondary Steam process — skipping");
@@ -192,30 +193,9 @@ pub extern "system" fn DllMain(hmodule: *mut u8, reason: u32, _reserved: *mut u8
     1
 }
 
-// ── Updater launcher ──────────────────────────────────────────────────────────
-
-fn launch_updater() {
-    let ps = updater_path();
-    if !std::path::Path::new(&ps).exists() {
-        log(&format!("WARN: updater.ps1 not found at {}", ps));
-        return;
-    }
-    use std::os::windows::process::CommandExt;
-    match std::process::Command::new("powershell.exe")
-        .args(["-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", &ps])
-        .creation_flags(0x08000000)
-        .spawn()
-    {
-        Ok(_) => log(&format!("Updater launched: {}", ps)),
-        Err(e) => log(&format!("ERROR: Failed to launch updater: {}", e)),
-    }
-}
 
 // ── API Key ───────────────────────────────────────────────────────────────────
 
-use std::fs;
-use std::path::Path;
-use std::sync::RwLock;
 
 static API_KEY: OnceLock<RwLock<String>> = OnceLock::new();
 
@@ -273,37 +253,6 @@ fn run_server() {
             log("<-- 200 OPTIONS");
             continue;
         }
-
-        // GET /script
-        if method == "GET" && path == "script" {
-            let local = format!("{}\\content.js", steam_dir());
-            match std::fs::read(&local) {
-                Ok(bytes) => {
-                    let response = Response::from_data(bytes)
-                        .with_header(cors_header())
-                        .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/javascript"[..]).unwrap());
-                    request.respond(response).ok();
-                    log("<-- 200 /script");
-                }
-                Err(_) => {
-                    request.respond(Response::from_string("Script not available").with_status_code(503).with_header(cors_header())).ok();
-                    log("<-- 503 /script (not found)");
-                }
-            }
-            continue;
-        }
-
-        // GET /status
-        if method == "GET" && path == "status" {
-            let body = format!("{{\"key_set\":{}}}", !get_api_key().is_empty());
-            let response = Response::from_string(body)
-                .with_header(cors_header())
-                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
-            request.respond(response).ok();
-            log("<-- 200 /status");
-            continue;
-        }
-
         if method != "POST" {
             request.respond(Response::from_string("Method Not Allowed").with_status_code(405)).ok();
             log("<-- 405");
