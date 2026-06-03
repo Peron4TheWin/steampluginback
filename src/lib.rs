@@ -301,19 +301,30 @@ fn update_cloudredirect() {
 }
 
 fn run_cloudredirect(exe_path: &str) {
-    log(&format!("Running: {} /stfixer", exe_path));
-    match std::process::Command::new(exe_path)
-        .arg("/stfixer")
+    log(&format!("Launching CloudRedirectCLI via bat: {}", exe_path));
+
+    let steam_exe = format!("{}\\steam.exe", steam_dir());
+    let bat_path = format!("{}\\run_cloudredirect.bat", steam_dir());
+
+    let bat = format!(
+        "@echo off\n\
+         \"{exe}\" /stfixer\n\
+         start \"\" \"{steam}\"\n",
+        exe = exe_path,
+        steam = steam_exe
+    );
+
+    if let Err(e) = std::fs::write(&bat_path, &bat) {
+        log(&format!("ERROR: Failed to write bat: {}", e));
+        return;
+    }
+
+    match std::process::Command::new("cmd")
+        .args(["/C", "start", "", &bat_path])
         .spawn()
     {
-        Ok(mut child) => {
-            log("CloudRedirectCLI launched, waiting for exit...");
-            match child.wait() {
-                Ok(status) => log(&format!("CloudRedirectCLI exited: {}", status)),
-                Err(e) => log(&format!("ERROR waiting for CloudRedirectCLI: {}", e)),
-            }
-        }
-        Err(e) => log(&format!("ERROR: Failed to run CloudRedirectCLI: {}", e)),
+        Ok(_) => log("CloudRedirect bat launched"),
+        Err(e) => log(&format!("ERROR: Failed to launch bat: {}", e)),
     }
 }
 
