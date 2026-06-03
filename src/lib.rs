@@ -247,36 +247,57 @@ fn download_bytes(url: &str) -> Option<Vec<u8>> {
 fn update_cloudredirect() {
     log("=== CloudRedirect update check ===");
     let exe_path = cloudredirect_exe_path();
+    let stamp_path = format!("{}\\CloudRedirectCLI.stamp", steam_dir());
 
     let (_, download_url, remote_hash) = match github_latest_asset("Selectively11/CloudRedirect", "CloudRedirectCLI.exe") {
         Some(v) => v,
         None => { log("WARN: Could not fetch CloudRedirect release info"); return; }
     };
 
+    // Leer el stamp (hash de la última versión ejecutada)
+    let last_run_hash = std::fs::read_to_string(&stamp_path).unwrap_or_default().trim().to_string();
+
     if std::path::Path::new(&exe_path).exists() {
         let local_hash = sha256_of_file(&exe_path).unwrap_or_default();
         log(&format!("Local  SHA256: {}", local_hash));
         log(&format!("Remote SHA256: {}", remote_hash));
-        if local_hash == remote_hash {
-            log("CloudRedirectCLI.exe is up to date");
-            run_cloudredirect(&exe_path);
+        log(&format!("Last run SHA256: {}", last_run_hash));
+
+        if local_hash == remote_hash && last_run_hash == remote_hash {
+            log("CloudRedirectCLI is up to date and already ran — skipping");
             return;
         }
-        log("SHA256 mismatch — updating...");
+
+        if local_hash != remote_hash {
+            log("SHA256 mismatch — updating...");
+            let bytes = match download_bytes(&download_url) {
+                Some(b) => b,
+                None => { log("ERROR: Failed to download CloudRedirectCLI.exe"); return; }
+            };
+            if let Err(e) = std::fs::write(&exe_path, &bytes) {
+                log(&format!("ERROR: Failed to write CloudRedirectCLI.exe: {}", e));
+                return;
+            }
+            log("CloudRedirectCLI.exe updated");
+        }
     } else {
         log("CloudRedirectCLI.exe not found — downloading...");
+        let bytes = match download_bytes(&download_url) {
+            Some(b) => b,
+            None => { log("ERROR: Failed to download CloudRedirectCLI.exe"); return; }
+        };
+        if let Err(e) = std::fs::write(&exe_path, &bytes) {
+            log(&format!("ERROR: Failed to write CloudRedirectCLI.exe: {}", e));
+            return;
+        }
+        log("CloudRedirectCLI.exe downloaded");
     }
 
-    let bytes = match download_bytes(&download_url) {
-        Some(b) => b,
-        None => { log("ERROR: Failed to download CloudRedirectCLI.exe"); return; }
-    };
-    if let Err(e) = std::fs::write(&exe_path, &bytes) {
-        log(&format!("ERROR: Failed to write CloudRedirectCLI.exe: {}", e));
-        return;
-    }
-    log("CloudRedirectCLI.exe saved");
     run_cloudredirect(&exe_path);
+
+    // Guardar el hash de la versión ejecutada
+    std::fs::write(&stamp_path, &remote_hash).ok();
+    log(&format!("Stamp updated: {}", stamp_path));
 }
 
 fn run_cloudredirect(exe_path: &str) {
