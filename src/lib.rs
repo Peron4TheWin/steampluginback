@@ -280,7 +280,7 @@ fn update_cloudredirect() {
 }
 
 fn run_cloudredirect(exe_path: &str) {
-    log(&format!("Running: {} /stfixes", exe_path));
+    log(&format!("Running: {} /stfixer", exe_path));
     match std::process::Command::new(exe_path)
         .arg("/stfixes")
         .output()
