@@ -1,4 +1,3 @@
-use std::os::windows::process::CommandExt;
 use std::thread;
 use std::sync::OnceLock;
 use std::io::Read;
@@ -48,16 +47,13 @@ extern "system" {
     fn GetProcAddress(module: *mut u8, name: *const i8) -> *mut u8;
     fn GetModuleFileNameW(hmodule: *mut u8, filename: *mut u16, size: u32) -> u32;
     fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
-    fn ShellExecuteA(hwnd: *mut u8, op: *const i8, file: *const i8, params: *const i8, dir: *const i8, show: i32) -> *mut u8;
 }
 
 // ── Paths ─────────────────────────────────────────────────────────────────────
 
 static STEAM_DIR: OnceLock<String> = OnceLock::new();
 static SYSTEM32_DIR: OnceLock<String> = OnceLock::new();
-static OWN_PATH: OnceLock<String> = OnceLock::new();
-#[link(name = "shell32")]
-unsafe extern "system" {}
+
 fn init_paths(hmodule: *mut u8) {
     unsafe {
         let mut sys_buf = vec![0u16; 260];
@@ -75,13 +71,11 @@ fn init_paths(hmodule: *mut u8) {
         if dll_len > 0 {
             dll_buf.truncate(dll_len as usize);
             let full = OsString::from_wide(&dll_buf).to_string_lossy().to_string();
-            OWN_PATH.set(full.clone()).ok();
             let steam_dir = full.rfind('\\')
                 .map(|i| full[..i].to_string())
                 .unwrap_or_else(|| ".".to_string());
             STEAM_DIR.set(steam_dir).ok();
         } else {
-            OWN_PATH.set(".\\version.dll".to_string()).ok();
             let cwd = std::env::current_dir()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| ".".to_string());
@@ -92,13 +86,11 @@ fn init_paths(hmodule: *mut u8) {
 
 fn steam_dir() -> &'static str { STEAM_DIR.get().map(|s| s.as_str()).unwrap_or(".") }
 fn system32_dir() -> &'static str { SYSTEM32_DIR.get().map(|s| s.as_str()).unwrap_or("C:\\Windows\\System32") }
-fn own_path() -> &'static str { OWN_PATH.get().map(|s| s.as_str()).unwrap_or(".\\version.dll") }
 fn lua_dir() -> String { format!("{}\\config\\stplug-in", steam_dir()) }
 fn key_path() -> String { format!("{}\\key.txt", steam_dir()) }
 fn log_path() -> String { format!("{}\\backend.log", steam_dir()) }
 fn real_version_dll_path() -> String { format!("{}\\version.dll", system32_dir()) }
-fn cloudredirect_exe_path() -> String { format!("{}\\CloudRedirectCLI.exe", steam_dir()) }
-fn script_path() -> String { format!("{}\\content.js", steam_dir()) }
+fn updater_path() -> String { format!("{}\\updater.ps1", steam_dir()) }
 
 // ── Logger ────────────────────────────────────────────────────────────────────
 
@@ -115,7 +107,6 @@ fn init_log() {
     log("DLL loaded");
     log(&format!("Steam dir:   {}", steam_dir()));
     log(&format!("System32:    {}", system32_dir()));
-    log(&format!("Own path:    {}", own_path()));
     log(&format!("lua dir:     {}", lua_dir()));
     log(&format!("key file:    {}", key_path()));
 }
@@ -128,340 +119,6 @@ fn log(msg: &str) {
         if let Ok(mut f) = f.lock() {
             writeln!(f, "[{}] {}", ts, msg).ok();
         }
-    }
-}
-
-// ── SHA256 ────────────────────────────────────────────────────────────────────
-
-fn sha256_of_bytes(data: &[u8]) -> String {
-    use sha2::{Sha256, Digest};
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    format!("{:x}", hasher.finalize())
-}
-
-fn sha256_of_file(path: &str) -> Option<String> {
-    let data = std::fs::read(path).ok()?;
-    Some(sha256_of_bytes(&data))
-}
-
-// ── GitHub release parser ─────────────────────────────────────────────────────
-
-// Devuelve (tag, download_url, sha256) sacando el digest directo del JSON
-fn github_latest_asset(repo: &str, asset_name: &str) -> Option<(String, String, String)> {
-    let api_url = format!("https://api.github.com/repos/{}/releases/latest", repo);
-    log(&format!("Checking GitHub latest for {} (asset: {})...", repo, asset_name));
-
-    let resp = ureq::get(&api_url)
-        .set("User-Agent", "steampluginback/1.0")
-        .set("Accept", "application/vnd.github+json")
-        .call().ok()?;
-
-    let body = resp.into_string().ok()?;
-    log(&format!("GitHub API response length: {} bytes", body.len()));
-
-    let tag = extract_json_str(&body, "tag_name")?;
-
-    let (download_url, digest) = find_asset_in_array(&body, asset_name)?;
-
-    // digest viene como "sha256:abc123..." — sacar solo el hash
-    let sha256 = digest.strip_prefix("sha256:").unwrap_or(&digest).to_string();
-
-    log(&format!("Latest tag: {}, asset sha256: {}...", tag, &sha256[..sha256.len().min(16)]));
-    Some((tag, download_url, sha256))
-}
-
-fn extract_json_str(json: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{}\":", key);
-    let start = json.find(&needle)? + needle.len();
-    let rest = json[start..].trim_start();
-    if rest.starts_with('"') {
-        let rest = &rest[1..];
-        let end = rest.find('"')?;
-        Some(rest[..end].to_string())
-    } else {
-        None
-    }
-}
-
-fn find_asset_in_array(json: &str, asset_name: &str) -> Option<(String, String)> {
-    // Buscar a partir del array "assets"
-    let assets_pos = json.find("\"assets\":")?;
-    let assets_json = &json[assets_pos..];
-
-    // Buscar "name":"<asset_name>" dentro del array
-    let needle = format!("\"name\":\"{}\"", asset_name);
-    let pos = assets_json.find(&needle)?;
-
-    // Retroceder para encontrar el { de inicio del objeto de este asset
-    let before = &assets_json[..pos];
-    let obj_start = before.rfind('{')?;
-    let obj = &assets_json[obj_start..];
-
-    // Delimitar el objeto
-    let obj_end = find_object_end(obj)?;
-    let obj_slice = &obj[..obj_end];
-
-    let download_url = extract_json_str(obj_slice, "browser_download_url")?;
-    let digest = extract_json_str(obj_slice, "digest").unwrap_or_default();
-
-    Some((download_url, digest))
-}
-
-fn find_object_end(s: &str) -> Option<usize> {
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escape = false;
-    for (i, c) in s.char_indices() {
-        if escape { escape = false; continue; }
-        if in_string {
-            if c == '\\' { escape = true; }
-            else if c == '"' { in_string = false; }
-            continue;
-        }
-        match c {
-            '"' => in_string = true,
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 { return Some(i + 1); }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn download_bytes(url: &str) -> Option<Vec<u8>> {
-    log(&format!("Downloading: {}", url));
-    let resp = ureq::get(url)
-        .set("User-Agent", "steampluginback/1.0")
-        .call().ok()?;
-    let mut buf = Vec::new();
-    resp.into_reader().read_to_end(&mut buf).ok()?;
-    log(&format!("Downloaded {} bytes", buf.len()));
-    Some(buf)
-}
-
-// ── Auto-update: CloudRedirectCLI ─────────────────────────────────────────────
-
-fn update_cloudredirect() {
-    log("=== CloudRedirect update check ===");
-    let exe_path = cloudredirect_exe_path();
-    let stamp_path = format!("{}\\CloudRedirectCLI.stamp", steam_dir());
-
-    let (_, download_url, remote_hash) = match github_latest_asset("Selectively11/CloudRedirect", "CloudRedirectCLI.exe") {
-        Some(v) => v,
-        None => { log("WARN: Could not fetch CloudRedirect release info"); return; }
-    };
-
-    // Leer el stamp (hash de la última versión ejecutada)
-    let last_run_hash = std::fs::read_to_string(&stamp_path).unwrap_or_default().trim().to_string();
-
-    if std::path::Path::new(&exe_path).exists() {
-        let local_hash = sha256_of_file(&exe_path).unwrap_or_default();
-        log(&format!("Local  SHA256: {}", local_hash));
-        log(&format!("Remote SHA256: {}", remote_hash));
-        log(&format!("Last run SHA256: {}", last_run_hash));
-
-        if local_hash == remote_hash && last_run_hash == remote_hash {
-            log("CloudRedirectCLI is up to date and already ran — skipping");
-            return;
-        }
-
-        if local_hash != remote_hash {
-            log("SHA256 mismatch — updating...");
-            let bytes = match download_bytes(&download_url) {
-                Some(b) => b,
-                None => { log("ERROR: Failed to download CloudRedirectCLI.exe"); return; }
-            };
-            if let Err(e) = std::fs::write(&exe_path, &bytes) {
-                log(&format!("ERROR: Failed to write CloudRedirectCLI.exe: {}", e));
-                return;
-            }
-            log("CloudRedirectCLI.exe updated");
-        }
-    } else {
-        log("CloudRedirectCLI.exe not found — downloading...");
-        let bytes = match download_bytes(&download_url) {
-            Some(b) => b,
-            None => { log("ERROR: Failed to download CloudRedirectCLI.exe"); return; }
-        };
-        if let Err(e) = std::fs::write(&exe_path, &bytes) {
-            log(&format!("ERROR: Failed to write CloudRedirectCLI.exe: {}", e));
-            return;
-        }
-        log("CloudRedirectCLI.exe downloaded");
-    }
-
-    run_cloudredirect(&exe_path);
-
-    // Guardar el hash de la versión ejecutada
-    std::fs::write(&stamp_path, &remote_hash).ok();
-    log(&format!("Stamp updated: {}", stamp_path));
-}
-
-fn run_cloudredirect(exe_path: &str) {
-    log(&format!("Launching CloudRedirectCLI via bat: {}", exe_path));
-
-    let steam_exe = format!("{}\\steam.exe", steam_dir());
-    let bat_path = format!("{}\\run_cloudredirect.bat", steam_dir());
-
-    let bat = format!(
-        "@echo off\n\
-         \"{exe}\" /stfixer\n\
-         start \"\" \"{steam}\"\n",
-        exe = exe_path,
-        steam = steam_exe
-    );
-
-    if let Err(e) = std::fs::write(&bat_path, &bat) {
-        log(&format!("ERROR: Failed to write bat: {}", e));
-        return;
-    }
-
-    match std::process::Command::new("cmd")
-        .args(["/C", &bat_path])
-        .creation_flags(0x08000000) // CREATE_NO_WINDOW
-        .spawn()
-    {
-        Ok(_) => log("CloudRedirect bat launched"),
-        Err(e) => log(&format!("ERROR: Failed to launch bat: {}", e)),
-    }
-}
-
-// ── Auto-update: version.dll (self) ──────────────────────────────────────────
-
-static DLL_UPDATE_PENDING: OnceLock<Mutex<bool>> = OnceLock::new();
-
-fn update_self() {
-    log("=== version.dll self-update check ===");
-    DLL_UPDATE_PENDING.set(Mutex::new(false)).ok();
-
-    let (_, download_url, remote_hash) = match github_latest_asset("Peron4TheWin/steampluginback", "version.dll") {
-        Some(v) => v,
-        None => { log("WARN: Could not fetch version.dll release info"); return; }
-    };
-
-    let local_hash = sha256_of_file(own_path()).unwrap_or_default();
-    log(&format!("Local  SHA256: {}", local_hash));
-    log(&format!("Remote SHA256: {}", remote_hash));
-
-    if local_hash == remote_hash {
-        log("version.dll is up to date");
-        return;
-    }
-
-    log("version.dll update available — downloading...");
-    let bytes = match download_bytes(&download_url) {
-        Some(b) => b,
-        None => { log("ERROR: Failed to download latest version.dll"); return; }
-    };
-
-    let new_path = format!("{}\\version_new.dll", steam_dir());
-    if let Err(e) = std::fs::write(&new_path, &bytes) {
-        log(&format!("ERROR: Failed to write version_new.dll: {}", e));
-        return;
-    }
-    log(&format!("Saved new DLL to: {}", new_path));
-
-    // PowerShell que espera que steam muera, mueve el dll y relanza Steam
-    let own = own_path().replace('\\', "\\\\");
-    let new = new_path.replace('\\', "\\\\");
-    let steam_exe = format!("{}\\steam.exe", steam_dir()).replace('\\', "\\\\");
-
-    let ps_script = format!(
-        "$src = \"{new}\"\n\
-         $dst = \"{own}\"\n\
-         $steamExe = \"{steam_exe}\"\n\
-         Write-Host \"Waiting for Steam to exit...\"\n\
-         while (Get-Process -Name \"steam\" -ErrorAction SilentlyContinue) {{\n\
-             Start-Sleep -Milliseconds 500\n\
-         }}\n\
-         Start-Sleep -Milliseconds 500\n\
-         Move-Item -Force $src $dst\n\
-         Write-Host \"version.dll updated\"\n\
-         Start-Process $steamExe\n\
-         Write-Host \"Steam relaunched\"\n",
-        new = new, own = own, steam_exe = steam_exe
-    );
-
-    let ps_path = format!("{}\\update_dll.ps1", steam_dir());
-    if let Err(e) = std::fs::write(&ps_path, &ps_script) {
-        log(&format!("ERROR: Failed to write update_dll.ps1: {}", e));
-        return;
-    }
-    log(&format!("PowerShell script saved: {}", ps_path));
-
-    // Lanzar PS en background invisible
-    unsafe {
-        let mut ps_arg: Vec<u8> = format!(
-            "-ExecutionPolicy Bypass -WindowStyle Hidden -File \"{}\"\0", ps_path
-        ).bytes().collect();
-        ShellExecuteA(
-            std::ptr::null_mut(),
-            b"open\0".as_ptr() as _,
-            b"powershell.exe\0".as_ptr() as _,
-            ps_arg.as_ptr() as _,
-            std::ptr::null(),
-            0,
-        );
-    }
-    log("PowerShell updater launched — killing Steam...");
-
-    std::process::Command::new("taskkill")
-        .args(["/F", "/IM", "steam.exe"])
-        .spawn().ok();
-
-    log("Steam kill signal sent — PS will relaunch it after move");
-
-    if let Some(flag) = DLL_UPDATE_PENDING.get() {
-        if let Ok(mut f) = flag.lock() { *f = true; }
-    }
-}
-
-fn dll_update_pending() -> bool {
-    DLL_UPDATE_PENDING.get()
-        .and_then(|m| m.lock().ok())
-        .map(|f| *f)
-        .unwrap_or(false)
-}
-
-// ── Auto-update: content.js ───────────────────────────────────────────────────
-
-fn update_script() {
-    log("=== content.js update check ===");
-    let url = "https://raw.githubusercontent.com/Peron4TheWin/steampluginfront/refs/heads/master/content/content.js";
-    let local_path = script_path();
-
-    let resp = match ureq::get(url).set("User-Agent", "steampluginback/1.0").call() {
-        Ok(r) => r,
-        Err(e) => { log(&format!("WARN: Failed to fetch content.js: {} — using cache", e)); return; }
-    };
-
-    if resp.status() != 200 {
-        log(&format!("WARN: content.js fetch returned {} — keeping local", resp.status()));
-        return;
-    }
-
-    let mut remote_bytes = Vec::new();
-    if resp.into_reader().read_to_end(&mut remote_bytes).is_err() {
-        log("ERROR: Failed to read content.js body");
-        return;
-    }
-
-    let remote_hash = sha256_of_bytes(&remote_bytes);
-    let local_hash = sha256_of_file(&local_path).unwrap_or_default();
-
-    if local_hash == remote_hash {
-        log("content.js is up to date");
-        return;
-    }
-
-    log("content.js changed — updating...");
-    match std::fs::write(&local_path, &remote_bytes) {
-        Ok(_) => log(&format!("content.js saved to {}", local_path)),
-        Err(e) => log(&format!("ERROR: Failed to write content.js: {}", e)),
     }
 }
 
@@ -510,7 +167,6 @@ fn load_real_version() {
 // ── DllMain ───────────────────────────────────────────────────────────────────
 
 fn is_primary_process() -> bool {
-    // Si ya hay algo en el puerto, somos un proceso secundario de Steam
     std::net::TcpStream::connect("127.0.0.1:3000").is_err()
 }
 
@@ -524,21 +180,36 @@ pub extern "system" fn DllMain(hmodule: *mut u8, reason: u32, _reserved: *mut u8
             init_api_key();
 
             if is_primary_process() {
-                log("Primary process — starting server and updates");
-                thread::spawn(|| {
-                    update_cloudredirect();
-                    update_self();
-                    update_script();
-                });
+                log("Primary process — starting server and updater");
+                launch_updater();
                 thread::spawn(|| run_server());
             } else {
-                log("Secondary Steam process — skipping server and updates");
+                log("Secondary Steam process — skipping");
             }
         }
         0 => log("DLL_PROCESS_DETACH"),
         _ => {}
     }
     1
+}
+
+// ── Updater launcher ──────────────────────────────────────────────────────────
+
+fn launch_updater() {
+    let ps = updater_path();
+    if !std::path::Path::new(&ps).exists() {
+        log(&format!("WARN: updater.ps1 not found at {}", ps));
+        return;
+    }
+    use std::os::windows::process::CommandExt;
+    match std::process::Command::new("powershell.exe")
+        .args(["-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", &ps])
+        .creation_flags(0x08000000)
+        .spawn()
+    {
+        Ok(_) => log(&format!("Updater launched: {}", ps)),
+        Err(e) => log(&format!("ERROR: Failed to launch updater: {}", e)),
+    }
 }
 
 // ── API Key ───────────────────────────────────────────────────────────────────
@@ -590,48 +261,42 @@ fn run_server() {
     for mut request in server.incoming_requests() {
         let method = request.method().as_str().to_string();
         let url = request.url().to_string();
+        let path = url.trim_start_matches('/').split('?').next().unwrap_or("").to_string();
         log(&format!("--> {} {}", method, url));
 
+        // OPTIONS preflight
+        if method == "OPTIONS" {
+            let response = Response::from_string("")
+                .with_header(cors_header())
+                .with_header(Header::from_bytes(&b"Access-Control-Allow-Methods"[..], &b"GET, POST, OPTIONS"[..]).unwrap())
+                .with_header(Header::from_bytes(&b"Access-Control-Allow-Headers"[..], &b"*"[..]).unwrap());
+            request.respond(response).ok();
+            log("<-- 200 OPTIONS");
+            continue;
+        }
+
         // GET /script
-        if method == "GET" && url.trim_start_matches('/').starts_with("script"){
-            thread::spawn(|| update_script());
-            let local = script_path();
+        if method == "GET" && path == "script" {
+            let local = format!("{}\\content.js", steam_dir());
             match std::fs::read(&local) {
                 Ok(bytes) => {
                     let response = Response::from_data(bytes)
                         .with_header(cors_header())
                         .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/javascript"[..]).unwrap());
                     request.respond(response).ok();
-                    log("<-- 200 /script (cached)");
+                    log("<-- 200 /script");
                 }
                 Err(_) => {
-                    log("No local content.js — fetching synchronously...");
-                    update_script();
-                    match std::fs::read(&local) {
-                        Ok(bytes) => {
-                            let response = Response::from_data(bytes)
-                                .with_header(cors_header())
-                                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/javascript"[..]).unwrap());
-                            request.respond(response).ok();
-                            log("<-- 200 /script (first fetch)");
-                        }
-                        Err(_) => {
-                            request.respond(Response::from_string("Script not available").with_status_code(503).with_header(cors_header())).ok();
-                            log("<-- 503 /script");
-                        }
-                    }
+                    request.respond(Response::from_string("Script not available").with_status_code(503).with_header(cors_header())).ok();
+                    log("<-- 503 /script (not found)");
                 }
             }
             continue;
         }
 
         // GET /status
-        if method == "GET" && url.trim_start_matches('/') == "status" {
-            let body = format!(
-                "{{\"update_pending\":{},\"key_set\":{}}}",
-                dll_update_pending(),
-                !get_api_key().is_empty()
-            );
+        if method == "GET" && path == "status" {
+            let body = format!("{{\"key_set\":{}}}", !get_api_key().is_empty());
             let response = Response::from_string(body)
                 .with_header(cors_header())
                 .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
@@ -647,7 +312,7 @@ fn run_server() {
         }
 
         // POST /key
-        if url.trim_start_matches('/') == "key" {
+        if path == "key" {
             let mut body = String::new();
             if request.as_reader().read_to_string(&mut body).is_err() {
                 request.respond(Response::from_string("Failed to read body").with_status_code(400)).ok();
@@ -682,7 +347,7 @@ fn run_server() {
         }
 
         // POST /<appid>
-        let appid = url.trim_start_matches('/').to_string();
+        let appid = path.clone();
         log(&format!("Fetching lua for appid: {}", appid));
         let mut _body = String::new();
         request.as_reader().read_to_string(&mut _body).ok();
@@ -700,10 +365,10 @@ fn run_server() {
                 resp.into_reader().read_to_end(&mut buf).ok();
                 log(&format!("Received {} bytes", buf.len()));
                 std::fs::create_dir_all(lua_dir()).ok();
-                let path = format!("{}\\{}.lua", lua_dir(), appid);
-                match std::fs::write(&path, &buf) {
-                    Ok(_) => log(&format!("Saved: {}", path)),
-                    Err(e) => log(&format!("ERROR writing {}: {}", path, e)),
+                let out_path = format!("{}\\{}.lua", lua_dir(), appid);
+                match std::fs::write(&out_path, &buf) {
+                    Ok(_) => log(&format!("Saved: {}", out_path)),
+                    Err(e) => log(&format!("ERROR writing {}: {}", out_path, e)),
                 }
                 request.respond(Response::from_string("OK").with_header(cors_header())).ok();
                 log("<-- 200 OK");
