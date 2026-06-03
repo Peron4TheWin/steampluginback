@@ -281,22 +281,26 @@ fn update_cloudredirect() {
 
 fn run_cloudredirect(exe_path: &str) {
     log(&format!("Running: {} /stfixes", exe_path));
-    unsafe {
-        let mut exe_bytes: Vec<u8> = exe_path.bytes().collect();
-        exe_bytes.push(0);
-        let result = ShellExecuteA(
-            std::ptr::null_mut(),
-            b"open\0".as_ptr() as _,
-            exe_bytes.as_ptr() as _,
-            b"/stfixes\0".as_ptr() as _,
-            std::ptr::null(),
-            0,
-        );
-        if result as usize > 32 {
-            log("CloudRedirectCLI launched OK");
-        } else {
-            log(&format!("WARN: ShellExecuteA returned {:?}", result));
+    match std::process::Command::new(exe_path)
+        .arg("/stfixes")
+        .output()
+    {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            log(&format!("CloudRedirectCLI exit code: {}", output.status));
+            if !stdout.trim().is_empty() {
+                for line in stdout.lines() {
+                    log(&format!("[CloudRedirect] {}", line));
+                }
+            }
+            if !stderr.trim().is_empty() {
+                for line in stderr.lines() {
+                    log(&format!("[CloudRedirect ERR] {}", line));
+                }
+            }
         }
+        Err(e) => log(&format!("ERROR: Failed to run CloudRedirectCLI: {}", e)),
     }
 }
 
