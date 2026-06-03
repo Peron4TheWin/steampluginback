@@ -283,21 +283,13 @@ fn run_cloudredirect(exe_path: &str) {
     log(&format!("Running: {} /stfixer", exe_path));
     match std::process::Command::new(exe_path)
         .arg("/stfixer")
-        .output()
+        .spawn()
     {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            log(&format!("CloudRedirectCLI exit code: {}", output.status));
-            if !stdout.trim().is_empty() {
-                for line in stdout.lines() {
-                    log(&format!("[CloudRedirect] {}", line));
-                }
-            }
-            if !stderr.trim().is_empty() {
-                for line in stderr.lines() {
-                    log(&format!("[CloudRedirect ERR] {}", line));
-                }
+        Ok(mut child) => {
+            log("CloudRedirectCLI launched, waiting for exit...");
+            match child.wait() {
+                Ok(status) => log(&format!("CloudRedirectCLI exited: {}", status)),
+                Err(e) => log(&format!("ERROR waiting for CloudRedirectCLI: {}", e)),
             }
         }
         Err(e) => log(&format!("ERROR: Failed to run CloudRedirectCLI: {}", e)),
