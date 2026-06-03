@@ -187,7 +187,6 @@ pub extern "system" fn DllMain(hmodule: *mut u8, reason: u32, _reserved: *mut u8
                 log("Secondary Steam process — skipping");
             }
         }
-        0 => log("DLL_PROCESS_DETACH"),
         _ => {}
     }
     1
