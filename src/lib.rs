@@ -1,3 +1,4 @@
+use std::os::windows::process::CommandExt;
 use std::thread;
 use std::sync::OnceLock;
 use std::io::Read;
@@ -320,7 +321,8 @@ fn run_cloudredirect(exe_path: &str) {
     }
 
     match std::process::Command::new("cmd")
-        .args(["/C", "start", "", &bat_path])
+        .args(["/C", &bat_path])
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .spawn()
     {
         Ok(_) => log("CloudRedirect bat launched"),
