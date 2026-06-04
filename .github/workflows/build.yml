@@ -3,8 +3,8 @@ name: Build and Release
 on:
   push:
     branches:
-      - master
-
+      - test
+#changed from master to test to avoid it from compiling while i test
 permissions:
   contents: write
 
