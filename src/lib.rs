@@ -457,7 +457,7 @@ fn kill_port_3000() {
             // dwLocalPort viene en network byte order (big-endian) en los 2 bytes superiores
             let port = ((raw_port & 0xFF) << 8) | ((raw_port >> 8) & 0xFF);
 
-            if port != 3000 { continue; }
+            if port != 27060 { continue; }
 
             let pid = u32::from_le_bytes(buf[offset+20..offset+24].try_into().unwrap());
             log(&format!("Puerto 3000 en uso por PID {}, matando...", pid));
