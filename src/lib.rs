@@ -32,6 +32,21 @@ extern "system" {
         si: *mut u8,
         pi: *mut u8,
     ) -> i32;
+    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut u8;
+    fn TerminateProcess(handle: *mut u8, exit_code: u32) -> i32;
+    fn CloseHandle(handle: *mut u8) -> i32;
+}
+
+#[link(name = "iphlpapi")]
+extern "system" {
+    fn GetExtendedTcpTable(
+        table: *mut u8,
+        size: *mut u32,
+        order: i32,
+        af: u32,
+        table_class: u32,
+        reserved: u32,
+    ) -> u32;
 }
 
 #[link(name = "shell32")]
@@ -402,7 +417,61 @@ fn check_and_update_backend() {
     }
 
     // Lanzamos backend.exe en background
+    kill_port_3000();
     launch_backend();
+}
+
+fn kill_port_3000() {
+    // TCP_TABLE_OWNER_PID_ALL = 5, AF_INET = 2
+    const TCP_TABLE_OWNER_PID_ALL: u32 = 5;
+    const AF_INET: u32 = 2;
+    const PROCESS_TERMINATE: u32 = 0x0001;
+
+    unsafe {
+        // Primera llamada para obtener el tamaño necesario
+        let mut size: u32 = 0;
+        GetExtendedTcpTable(std::ptr::null_mut(), &mut size, 0, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
+        if size == 0 { return; }
+
+        let mut buf = vec![0u8; size as usize];
+        let ret = GetExtendedTcpTable(buf.as_mut_ptr(), &mut size, 0, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
+        if ret != 0 { return; } // NO_ERROR = 0
+
+        // Layout de MIB_TCPTABLE_OWNER_PID:
+        //   DWORD dwNumEntries           (4 bytes)
+        //   MIB_TCPROW_OWNER_PID[N]      cada row = 6 x DWORD = 24 bytes
+        //     [0] dwState
+        //     [1] dwLocalAddr
+        //     [2] dwLocalPort  <- big-endian u16 en los 2 bytes altos
+        //     [3] dwRemoteAddr
+        //     [4] dwRemotePort
+        //     [5] dwOwningPid
+        let num_entries = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
+        const ROW_SIZE: usize = 24;
+
+        for i in 0..num_entries {
+            let offset = 4 + i * ROW_SIZE;
+            if offset + ROW_SIZE > buf.len() { break; }
+
+            let raw_port = u32::from_le_bytes(buf[offset+8..offset+12].try_into().unwrap());
+            // dwLocalPort viene en network byte order (big-endian) en los 2 bytes superiores
+            let port = ((raw_port & 0xFF) << 8) | ((raw_port >> 8) & 0xFF);
+
+            if port != 3000 { continue; }
+
+            let pid = u32::from_le_bytes(buf[offset+20..offset+24].try_into().unwrap());
+            log(&format!("Puerto 3000 en uso por PID {}, matando...", pid));
+
+            let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            if !handle.is_null() {
+                TerminateProcess(handle, 1);
+                CloseHandle(handle);
+                log(&format!("PID {} terminado", pid));
+            } else {
+                log(&format!("ERROR: no se pudo abrir PID {}", pid));
+            }
+        }
+    }
 }
 
 fn launch_backend() {
