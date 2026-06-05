@@ -196,10 +196,6 @@ fn load_real_version() {
 
 fn sha256_file(path: &str) -> Option<String> {
     use std::io::BufReader;
-
-    // SHA-256 manual (sin deps externos) usando la crate sha2 que ya debe estar en Cargo.toml
-    // Si no tenés sha2, agregá: sha2 = "0.10"
-    // Acá usamos sha2::Digest
     use sha2::{Sha256, Digest};
 
     let file = fs::File::open(path).ok()?;
@@ -217,8 +213,6 @@ fn sha256_file(path: &str) -> Option<String> {
 
 // ── GitHub release check + download ──────────────────────────────────────────
 
-// Parseo mínimo del JSON de GitHub sin serde
-// Extrae el valor string de la primera ocurrencia de "key": "value" en el slice dado
 fn extract_str_after<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     let needle = format!("\"{}\":", key);
     let start = json.find(&needle)? + needle.len();
@@ -229,9 +223,6 @@ fn extract_str_after<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     Some(&inner[..end])
 }
 
-// Busca en el JSON del release el asset .exe y devuelve (browser_download_url, sha256)
-// El SHA256 viene en el campo "digest": "sha256:abc123..."
-// https://docs.github.com/en/rest/releases/assets
 fn find_exe_asset(json: &str) -> Option<(String, String)> {
     let mut search = json;
     while let Some(pos) = search.find("\"name\":") {
@@ -241,7 +232,6 @@ fn find_exe_asset(json: &str) -> Option<(String, String)> {
                 let url = extract_str_after(rest, "browser_download_url")
                     .unwrap_or("")
                     .to_string();
-                // "digest": "sha256:abc123..."
                 let sha = extract_str_after(rest, "digest")
                     .and_then(|d| d.strip_prefix("sha256:"))
                     .unwrap_or("")
@@ -270,6 +260,9 @@ fn check_and_update_backend() {
         }
         Err(e) => {
             log(&format!("ERROR consultando GitHub API: {}", e));
+            // Si falla la API igual intentamos lanzar lo que haya
+            kill_port_3000();
+            launch_backend();
             return;
         }
     };
@@ -278,6 +271,8 @@ fn check_and_update_backend() {
         Some(v) => v,
         None => {
             log("ERROR: no se encontro asset .exe en el latest release");
+            kill_port_3000();
+            launch_backend();
             return;
         }
     };
@@ -285,10 +280,11 @@ fn check_and_update_backend() {
 
     if expected_sha.is_empty() {
         log("WARN: el asset no tiene campo digest, no se puede verificar SHA256");
+        kill_port_3000();
+        launch_backend();
         return;
     }
 
-    // SHA256 del backend.exe local
     let local_path = backend_path();
     let local_sha = if Path::new(&local_path).exists() {
         sha256_file(&local_path).unwrap_or_default()
@@ -300,9 +296,13 @@ fn check_and_update_backend() {
     if local_sha == expected_sha {
         log("backend.exe esta actualizado, nada que hacer");
     } else {
-        log("SHA256 no coincide, descargando nueva version...");
+        log("SHA256 no coincide, matando proceso y descargando nueva version...");
 
-        // Borramos el viejo
+        // Primero matamos el proceso que lo tiene bloqueado
+        kill_port_3000();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+
+        // Ahora sí borramos
         if Path::new(&local_path).exists() {
             if let Err(e) = fs::remove_file(&local_path) {
                 log(&format!("ERROR borrando backend.exe viejo: {}", e));
@@ -326,7 +326,6 @@ fn check_and_update_backend() {
                         return;
                     }
                 }
-                // Verificamos el SHA del recien bajado
                 let new_sha = sha256_file(&local_path).unwrap_or_default();
                 if new_sha == expected_sha {
                     log("SHA256 verificado OK post-descarga");
@@ -339,38 +338,31 @@ fn check_and_update_backend() {
                 return;
             }
         }
+
+        // Lanzamos después de actualizar
+        launch_backend();
+        return;
     }
 
-    // Lanzamos backend.exe en background
+    // Lanzamos (caso sha coincide, proceso puede estar caído)
     kill_port_3000();
     launch_backend();
 }
 
 fn kill_port_3000() {
-    // TCP_TABLE_OWNER_PID_ALL = 5, AF_INET = 2
     const TCP_TABLE_OWNER_PID_ALL: u32 = 5;
     const AF_INET: u32 = 2;
     const PROCESS_TERMINATE: u32 = 0x0001;
 
     unsafe {
-        // Primera llamada para obtener el tamaño necesario
         let mut size: u32 = 0;
         GetExtendedTcpTable(std::ptr::null_mut(), &mut size, 0, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
         if size == 0 { return; }
 
         let mut buf = vec![0u8; size as usize];
         let ret = GetExtendedTcpTable(buf.as_mut_ptr(), &mut size, 0, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
-        if ret != 0 { return; } // NO_ERROR = 0
+        if ret != 0 { return; }
 
-        // Layout de MIB_TCPTABLE_OWNER_PID:
-        //   DWORD dwNumEntries           (4 bytes)
-        //   MIB_TCPROW_OWNER_PID[N]      cada row = 6 x DWORD = 24 bytes
-        //     [0] dwState
-        //     [1] dwLocalAddr
-        //     [2] dwLocalPort  <- big-endian u16 en los 2 bytes altos
-        //     [3] dwRemoteAddr
-        //     [4] dwRemotePort
-        //     [5] dwOwningPid
         let num_entries = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
         const ROW_SIZE: usize = 24;
 
@@ -379,7 +371,6 @@ fn kill_port_3000() {
             if offset + ROW_SIZE > buf.len() { break; }
 
             let raw_port = u32::from_le_bytes(buf[offset+8..offset+12].try_into().unwrap());
-            // dwLocalPort viene en network byte order (big-endian) en los 2 bytes superiores
             let port = ((raw_port & 0xFF) << 8) | ((raw_port >> 8) & 0xFF);
 
             if port != 3000 { continue; }
@@ -410,11 +401,8 @@ fn launch_backend() {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    // STARTUPINFOW es 104 bytes en x64; lo inicializamos con ceros
     let mut si = vec![0u8; 104];
-    // cb = sizeof(STARTUPINFOW) = 104
     si[0] = 104;
-    // PROCESS_INFORMATION = 24 bytes
     let mut pi = vec![0u8; 24];
 
     let app = to_wide(&path);
@@ -452,7 +440,6 @@ pub extern "system" fn DllMain(hmodule: *mut u8, reason: u32, _reserved: *mut u8
             init_paths(hmodule_addr as *mut u8);
             init_log();
             load_real_version();
-            // 2. Chequear/actualizar/lanzar backend.exe
             check_and_update_backend();
         });
     }
