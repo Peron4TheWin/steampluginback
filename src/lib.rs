@@ -1,5 +1,5 @@
 #![allow(non_snake_case, non_camel_case_types, dead_code, improper_ctypes)]
-
+//TODO There is no need to do all that to force CEF, literally a file called ".cef-enable-remote-debugging" will force CEF to load ALWAYS
 use std::thread;
 use std::sync::OnceLock;
 use std::ffi::OsString;
