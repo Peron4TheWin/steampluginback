@@ -17,7 +17,6 @@ const BACKEND_EXE: &str = "backend.exe";
 // ── Win32 imports ─────────────────────────────────────────────────────────────
 
 extern "system" {
-    fn GetCommandLineW() -> *const u16;
     fn GetModuleFileNameW(hmodule: *mut u8, filename: *mut u16, size: u32) -> u32;
     fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
     fn CreateProcessW(
@@ -49,17 +48,6 @@ extern "system" {
     ) -> u32;
 }
 
-#[link(name = "shell32")]
-extern "system" {
-    fn ShellExecuteW(
-        hwnd: *mut u8,
-        operation: *const u16,
-        file: *const u16,
-        params: *const u16,
-        dir: *const u16,
-        show: i32,
-    ) -> isize;
-}
 
 // DETACHED_PROCESS | CREATE_NO_WINDOW
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -102,8 +90,6 @@ fn init_paths(hmodule: *mut u8) {
 fn steam_dir() -> &'static str { STEAM_DIR.get().map(|s| s.as_str()).unwrap_or(".") }
 fn log_path() -> String { format!("{}\\version_dll.log", steam_dir()) }
 fn backend_path() -> String { format!("{}\\{}", steam_dir(), BACKEND_EXE) }
-fn cef_bat_path() -> String { format!("{}\\cef.bat", steam_dir()) }
-fn cef_stamp_path() -> String { format!("{}\\cef.stamp", steam_dir()) }
 
 // ── Logger ────────────────────────────────────────────────────────────────────
 
@@ -203,67 +189,6 @@ fn load_real_version() {
             VerQueryValueW:            gfn!(VerQueryValueW),
         }).ok();
         log("version.dll real cargado OK");
-    }
-}
-
-// ── CEF debug check ───────────────────────────────────────────────────────────
-
-fn has_cef_debug_flag() -> bool {
-    unsafe {
-        let ptr = GetCommandLineW();
-        if ptr.is_null() { return false; }
-        let mut len = 0usize;
-        while *ptr.add(len) != 0 { len += 1; }
-        let cmdline = OsString::from_wide(std::slice::from_raw_parts(ptr, len))
-            .to_string_lossy()
-            .to_lowercase();
-        cmdline.contains("-cef-enable-debugging")
-    }
-}
-
-fn launch_cef_bat() {
-    let bat = cef_bat_path();
-    if !Path::new(&bat).exists() {
-        log("cef.bat no encontrado, creandolo...");
-        let content = "@echo off\r\ntaskkill /im steam.exe /f\r\nstart \"\" steam.exe -cef-enable-debugging\r\nexit\r\n";
-        match fs::write(&bat, content) {
-            Ok(_)  => log("cef.bat creado OK"),
-            Err(e) => { log(&format!("ERROR creando cef.bat: {}", e)); return; }
-        }
-    }
-
-    // Escribimos el timestamp ANTES de lanzar el bat
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    fs::write(cef_stamp_path(), now.to_string()).ok();
-    log(&format!("Stamp escrito (ts={}), lanzando cef.bat...", now));
-
-    fn to_wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(std::iter::once(0)).collect()
-    }
-
-    unsafe {
-        let op   = to_wide("open");
-        let file = to_wide(&bat);
-        let dir  = to_wide(steam_dir());
-
-        let result = ShellExecuteW(
-            std::ptr::null_mut(),
-            op.as_ptr(),
-            file.as_ptr(),
-            std::ptr::null(),
-            dir.as_ptr(),
-            0, // SW_HIDE
-        );
-        if result > 32 {
-            log("cef.bat lanzado OK");
-        } else {
-            // Si falló lanzar, reseteamos el stamp para que lo reintente
-            fs::write(cef_stamp_path(), "0").ok();
-            log(&format!("ERROR lanzando cef.bat: ShellExecuteW devolvio {}", result));
-        }
     }
 }
 
@@ -457,7 +382,7 @@ fn kill_port_3000() {
             // dwLocalPort viene en network byte order (big-endian) en los 2 bytes superiores
             let port = ((raw_port & 0xFF) << 8) | ((raw_port >> 8) & 0xFF);
 
-            if port != 27060 { continue; }
+            if port != 3000 { continue; }
 
             let pid = u32::from_le_bytes(buf[offset+20..offset+24].try_into().unwrap());
             log(&format!("Puerto 3000 en uso por PID {}, matando...", pid));
@@ -527,32 +452,6 @@ pub extern "system" fn DllMain(hmodule: *mut u8, reason: u32, _reserved: *mut u8
             init_paths(hmodule_addr as *mut u8);
             init_log();
             load_real_version();
-
-            // 1. Chequear CEF debug flag
-            if has_cef_debug_flag() {
-                log("CEF debugging habilitado OK");
-            } else {
-                // Chequeamos si lanzamos el bat hace menos de 10 segundos
-                // (ventana de tiempo para que Steam se mate y se reinicie)
-                let stamp_path = cef_stamp_path();
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-
-                let last_launch = fs::read_to_string(&stamp_path)
-                    .ok()
-                    .and_then(|s| s.trim().parse::<u64>().ok())
-                    .unwrap_or(0);
-
-                if now.saturating_sub(last_launch) < 10 {
-                    log(&format!("Bat lanzado hace {}s, esperando que Steam reinicie...", now - last_launch));
-                } else {
-                    log("CEF debugging NO detectado, lanzando cef.bat...");
-                    launch_cef_bat();
-                }
-            }
-
             // 2. Chequear/actualizar/lanzar backend.exe
             check_and_update_backend();
         });
