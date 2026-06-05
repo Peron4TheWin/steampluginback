@@ -209,8 +209,12 @@ fn has_cef_debug_flag() -> bool {
 fn launch_cef_bat() {
     let bat = cef_bat_path();
     if !Path::new(&bat).exists() {
-        log(&format!("cef.bat no encontrado en: {}", bat));
-        return;
+        log("cef.bat no encontrado, creandolo...");
+        let content = "@echo off\r\ntaskkill /im steam.exe /f\r\nstart \"\" steam.exe -cef-enable-debugging\r\nexit\r\n";
+        match fs::write(&bat, content) {
+            Ok(_)  => log("cef.bat creado OK"),
+            Err(e) => { log(&format!("ERROR creando cef.bat: {}", e)); return; }
+        }
     }
 
     // Escribimos el timestamp ANTES de lanzar el bat
