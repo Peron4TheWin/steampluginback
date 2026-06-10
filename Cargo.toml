@@ -1,10 +1,10 @@
 [package]
-name = "wsock32-proxy"
+name = "winmn-proxy"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "wsock32"
+name = "winmn"
 crate-type = ["cdylib"]
 
 [dependencies]
