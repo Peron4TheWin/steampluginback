@@ -1,10 +1,10 @@
 [package]
-name = "winmn-proxy"
+name = "winhttp-proxy"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "winmn"
+name = "winhttp"
 crate-type = ["cdylib"]
 
 [dependencies]
