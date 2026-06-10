@@ -1,5 +1,4 @@
 #![allow(non_snake_case, non_camel_case_types, dead_code, improper_ctypes)]
-//TODO There is no need to do all that to force CEF, literally a file called ".cef-enable-remote-debugging" will force CEF to load ALWAYS
 use std::thread;
 use std::sync::OnceLock;
 use std::ffi::OsString;
@@ -48,8 +47,6 @@ extern "system" {
     ) -> u32;
 }
 
-
-// DETACHED_PROCESS | CREATE_NO_WINDOW
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const DETACHED_PROCESS: u32 = 0x00000008;
 
@@ -88,7 +85,7 @@ fn init_paths(hmodule: *mut u8) {
 }
 
 fn steam_dir() -> &'static str { STEAM_DIR.get().map(|s| s.as_str()).unwrap_or(".") }
-fn log_path() -> String { format!("{}\\version_dll.log", steam_dir()) }
+fn log_path() -> String { format!("{}\\wsock32_dll.log", steam_dir()) }
 fn backend_path() -> String { format!("{}\\{}", steam_dir(), BACKEND_EXE) }
 
 // ── Logger ────────────────────────────────────────────────────────────────────
@@ -117,78 +114,174 @@ fn log(msg: &str) {
     }
 }
 
-// ── Version DLL proxy ─────────────────────────────────────────────────────────
+// ── Wsock32 proxy ─────────────────────────────────────────────────────────────
 
-type FnGetFileVersionInfoA     = unsafe extern "system" fn(*const i8, u32, u32, *mut u8) -> i32;
-type FnGetFileVersionInfoW     = unsafe extern "system" fn(*const u16, u32, u32, *mut u8) -> i32;
-type FnGetFileVersionInfoSizeA = unsafe extern "system" fn(*const i8, *mut u32) -> u32;
-type FnGetFileVersionInfoSizeW = unsafe extern "system" fn(*const u16, *mut u32) -> u32;
-type FnGetFileVersionInfoSizeExW = unsafe extern "system" fn(u32, *const u16, *mut u32) -> u32;
-type FnGetFileVersionInfoExW   = unsafe extern "system" fn(u32, *const u16, u32, u32, *mut u8) -> i32;
-type FnVerFindFileA   = unsafe extern "system" fn(u32, *const i8, *const i8, *const i8, *mut i8, *mut u32, *mut i8, *mut u32) -> u32;
-type FnVerFindFileW   = unsafe extern "system" fn(u32, *const u16, *const u16, *const u16, *mut u16, *mut u32, *mut u16, *mut u32) -> u32;
-type FnVerInstallFileA = unsafe extern "system" fn(u32, *const i8, *const i8, *const i8, *const i8, *const i8, *mut i8, *mut u32) -> u32;
-type FnVerInstallFileW = unsafe extern "system" fn(u32, *const u16, *const u16, *const u16, *const u16, *const u16, *mut u16, *mut u32) -> u32;
-type FnVerLanguageNameA = unsafe extern "system" fn(u32, *mut i8, u32) -> u32;
-type FnVerLanguageNameW = unsafe extern "system" fn(u32, *mut u16, u32) -> u32;
-type FnVerQueryValueA = unsafe extern "system" fn(*const u8, *const i8, *mut *mut u8, *mut u32) -> i32;
-type FnVerQueryValueW = unsafe extern "system" fn(*const u8, *const u16, *mut *mut u8, *mut u32) -> i32;
+type SOCKET = usize;
+type FARPROC = *mut u8;
 
-struct VersionFns {
-    GetFileVersionInfoA:      FnGetFileVersionInfoA,
-    GetFileVersionInfoW:      FnGetFileVersionInfoW,
-    GetFileVersionInfoSizeA:  FnGetFileVersionInfoSizeA,
-    GetFileVersionInfoSizeW:  FnGetFileVersionInfoSizeW,
-    GetFileVersionInfoSizeExW:FnGetFileVersionInfoSizeExW,
-    GetFileVersionInfoExW:    FnGetFileVersionInfoExW,
-    VerFindFileA:             FnVerFindFileA,
-    VerFindFileW:             FnVerFindFileW,
-    VerInstallFileA:          FnVerInstallFileA,
-    VerInstallFileW:          FnVerInstallFileW,
-    VerLanguageNameA:         FnVerLanguageNameA,
-    VerLanguageNameW:         FnVerLanguageNameW,
-    VerQueryValueA:           FnVerQueryValueA,
-    VerQueryValueW:           FnVerQueryValueW,
+type Fn_accept                   = unsafe extern "system" fn(SOCKET, *mut u8, *mut i32) -> SOCKET;
+type Fn_bind                     = unsafe extern "system" fn(SOCKET, *const u8, i32) -> i32;
+type Fn_closesocket              = unsafe extern "system" fn(SOCKET) -> i32;
+type Fn_connect                  = unsafe extern "system" fn(SOCKET, *const u8, i32) -> i32;
+type Fn_gethostbyaddr            = unsafe extern "system" fn(*const i8, i32, i32) -> *mut u8;
+type Fn_gethostbyname            = unsafe extern "system" fn(*const i8) -> *mut u8;
+type Fn_gethostname              = unsafe extern "system" fn(*mut i8, i32) -> i32;
+type Fn_getpeername              = unsafe extern "system" fn(SOCKET, *mut u8, *mut i32) -> i32;
+type Fn_getprotobyname           = unsafe extern "system" fn(*const i8) -> *mut u8;
+type Fn_getprotobynumber         = unsafe extern "system" fn(i32) -> *mut u8;
+type Fn_getservbyname            = unsafe extern "system" fn(*const i8, *const i8) -> *mut u8;
+type Fn_getservbyport            = unsafe extern "system" fn(i32, *const i8) -> *mut u8;
+type Fn_getsockname              = unsafe extern "system" fn(SOCKET, *mut u8, *mut i32) -> i32;
+type Fn_getsockopt               = unsafe extern "system" fn(SOCKET, i32, i32, *mut i8, *mut i32) -> i32;
+type Fn_htonl                    = unsafe extern "system" fn(u32) -> u32;
+type Fn_htons                    = unsafe extern "system" fn(u16) -> u16;
+type Fn_ioctlsocket              = unsafe extern "system" fn(SOCKET, i32, *mut u32) -> i32;
+type Fn_listen                   = unsafe extern "system" fn(SOCKET, i32) -> i32;
+type Fn_ntohl                    = unsafe extern "system" fn(u32) -> u32;
+type Fn_ntohs                    = unsafe extern "system" fn(u16) -> u16;
+type Fn_recv                     = unsafe extern "system" fn(SOCKET, *mut i8, i32, i32) -> i32;
+type Fn_recvfrom                 = unsafe extern "system" fn(SOCKET, *mut i8, i32, i32, *mut u8, *mut i32) -> i32;
+type Fn_select                   = unsafe extern "system" fn(i32, *mut u8, *mut u8, *mut u8, *const u8) -> i32;
+type Fn_send                     = unsafe extern "system" fn(SOCKET, *const i8, i32, i32) -> i32;
+type Fn_sendto                   = unsafe extern "system" fn(SOCKET, *const i8, i32, i32, *const u8, i32) -> i32;
+type Fn_setsockopt               = unsafe extern "system" fn(SOCKET, i32, i32, *const i8, i32) -> i32;
+type Fn_shutdown                 = unsafe extern "system" fn(SOCKET, i32) -> i32;
+type Fn_socket                   = unsafe extern "system" fn(i32, i32, i32) -> SOCKET;
+type Fn_WSAAsyncGetHostByAddr    = unsafe extern "system" fn(*mut u8, u32, *const i8, i32, i32, *mut i8, i32) -> *mut u8;
+type Fn_WSAAsyncGetHostByName    = unsafe extern "system" fn(*mut u8, u32, *const i8, *mut i8, i32) -> *mut u8;
+type Fn_WSAAsyncGetProtoByName   = unsafe extern "system" fn(*mut u8, u32, *const i8, *mut i8, i32) -> *mut u8;
+type Fn_WSAAsyncGetProtoByNumber = unsafe extern "system" fn(*mut u8, u32, i32, *mut i8, i32) -> *mut u8;
+type Fn_WSAAsyncGetServByName    = unsafe extern "system" fn(*mut u8, u32, *const i8, *const i8, *mut i8, i32) -> *mut u8;
+type Fn_WSAAsyncGetServByPort    = unsafe extern "system" fn(*mut u8, u32, i32, *const i8, *mut i8, i32) -> *mut u8;
+type Fn_WSAAsyncSelect           = unsafe extern "system" fn(SOCKET, *mut u8, u32, i32) -> i32;
+type Fn_WSACancelAsyncRequest    = unsafe extern "system" fn(*mut u8) -> i32;
+type Fn_WSACancelBlockingCall    = unsafe extern "system" fn() -> i32;
+type Fn_WSACleanup               = unsafe extern "system" fn() -> i32;
+type Fn_WSAGetLastError          = unsafe extern "system" fn() -> i32;
+type Fn_WSAIsBlocking            = unsafe extern "system" fn() -> i32;
+type Fn_WSASetBlockingHook       = unsafe extern "system" fn(FARPROC) -> FARPROC;
+type Fn_WSASetLastError          = unsafe extern "system" fn(i32);
+type Fn_WSAStartup               = unsafe extern "system" fn(u16, *mut u8) -> i32;
+type Fn_WSAUnhookBlockingHook    = unsafe extern "system" fn() -> i32;
+type Fn___WSAFdIsSet             = unsafe extern "system" fn(SOCKET, *mut u8) -> i32;
+
+struct WsockFns {
+    accept:                  Fn_accept,
+    bind:                    Fn_bind,
+    closesocket:             Fn_closesocket,
+    connect:                 Fn_connect,
+    gethostbyaddr:           Fn_gethostbyaddr,
+    gethostbyname:           Fn_gethostbyname,
+    gethostname:             Fn_gethostname,
+    getpeername:             Fn_getpeername,
+    getprotobyname:          Fn_getprotobyname,
+    getprotobynumber:        Fn_getprotobynumber,
+    getservbyname:           Fn_getservbyname,
+    getservbyport:           Fn_getservbyport,
+    getsockname:             Fn_getsockname,
+    getsockopt:              Fn_getsockopt,
+    htonl:                   Fn_htonl,
+    htons:                   Fn_htons,
+    ioctlsocket:             Fn_ioctlsocket,
+    listen:                  Fn_listen,
+    ntohl:                   Fn_ntohl,
+    ntohs:                   Fn_ntohs,
+    recv:                    Fn_recv,
+    recvfrom:                Fn_recvfrom,
+    select:                  Fn_select,
+    send:                    Fn_send,
+    sendto:                  Fn_sendto,
+    setsockopt:              Fn_setsockopt,
+    shutdown:                Fn_shutdown,
+    socket:                  Fn_socket,
+    WSAAsyncGetHostByAddr:   Fn_WSAAsyncGetHostByAddr,
+    WSAAsyncGetHostByName:   Fn_WSAAsyncGetHostByName,
+    WSAAsyncGetProtoByName:  Fn_WSAAsyncGetProtoByName,
+    WSAAsyncGetProtoByNumber:Fn_WSAAsyncGetProtoByNumber,
+    WSAAsyncGetServByName:   Fn_WSAAsyncGetServByName,
+    WSAAsyncGetServByPort:   Fn_WSAAsyncGetServByPort,
+    WSAAsyncSelect:          Fn_WSAAsyncSelect,
+    WSACancelAsyncRequest:   Fn_WSACancelAsyncRequest,
+    WSACancelBlockingCall:   Fn_WSACancelBlockingCall,
+    WSACleanup:              Fn_WSACleanup,
+    WSAGetLastError:         Fn_WSAGetLastError,
+    WSAIsBlocking:           Fn_WSAIsBlocking,
+    WSASetBlockingHook:      Fn_WSASetBlockingHook,
+    WSASetLastError:         Fn_WSASetLastError,
+    WSAStartup:              Fn_WSAStartup,
+    WSAUnhookBlockingHook:   Fn_WSAUnhookBlockingHook,
+    __WSAFdIsSet:            Fn___WSAFdIsSet,
 }
 
-unsafe impl Send for VersionFns {}
-unsafe impl Sync for VersionFns {}
+unsafe impl Send for WsockFns {}
+unsafe impl Sync for WsockFns {}
 
-static REAL: OnceLock<VersionFns> = OnceLock::new();
+static REAL: OnceLock<WsockFns> = OnceLock::new();
 
 extern "system" {
     fn LoadLibraryA(name: *const i8) -> *mut u8;
     fn GetProcAddress(module: *mut u8, name: *const i8) -> *mut u8;
 }
 
-fn load_real_version() {
+fn load_real_wsock32() {
     unsafe {
-        let path = format!("{}\\version.dll\0", SYSTEM32_DIR.get().unwrap());
+        let path = format!("{}\\wsock32.dll\0", SYSTEM32_DIR.get().unwrap());
         let lib = LoadLibraryA(path.as_ptr() as _);
-        if lib.is_null() { log("ERROR: no se pudo cargar version.dll real"); return; }
+        if lib.is_null() { log("ERROR: no se pudo cargar wsock32.dll real"); return; }
         macro_rules! gfn {
             ($name:ident) => {{
                 let ptr = GetProcAddress(lib, concat!(stringify!($name), "\0").as_ptr() as _);
                 std::mem::transmute(ptr)
             }};
         }
-        REAL.set(VersionFns {
-            GetFileVersionInfoA:       gfn!(GetFileVersionInfoA),
-            GetFileVersionInfoW:       gfn!(GetFileVersionInfoW),
-            GetFileVersionInfoSizeA:   gfn!(GetFileVersionInfoSizeA),
-            GetFileVersionInfoSizeW:   gfn!(GetFileVersionInfoSizeW),
-            GetFileVersionInfoSizeExW: gfn!(GetFileVersionInfoSizeExW),
-            GetFileVersionInfoExW:     gfn!(GetFileVersionInfoExW),
-            VerFindFileA:              gfn!(VerFindFileA),
-            VerFindFileW:              gfn!(VerFindFileW),
-            VerInstallFileA:           gfn!(VerInstallFileA),
-            VerInstallFileW:           gfn!(VerInstallFileW),
-            VerLanguageNameA:          gfn!(VerLanguageNameA),
-            VerLanguageNameW:          gfn!(VerLanguageNameW),
-            VerQueryValueA:            gfn!(VerQueryValueA),
-            VerQueryValueW:            gfn!(VerQueryValueW),
+        REAL.set(WsockFns {
+            accept:                  gfn!(accept),
+            bind:                    gfn!(bind),
+            closesocket:             gfn!(closesocket),
+            connect:                 gfn!(connect),
+            gethostbyaddr:           gfn!(gethostbyaddr),
+            gethostbyname:           gfn!(gethostbyname),
+            gethostname:             gfn!(gethostname),
+            getpeername:             gfn!(getpeername),
+            getprotobyname:          gfn!(getprotobyname),
+            getprotobynumber:        gfn!(getprotobynumber),
+            getservbyname:           gfn!(getservbyname),
+            getservbyport:           gfn!(getservbyport),
+            getsockname:             gfn!(getsockname),
+            getsockopt:              gfn!(getsockopt),
+            htonl:                   gfn!(htonl),
+            htons:                   gfn!(htons),
+            ioctlsocket:             gfn!(ioctlsocket),
+            listen:                  gfn!(listen),
+            ntohl:                   gfn!(ntohl),
+            ntohs:                   gfn!(ntohs),
+            recv:                    gfn!(recv),
+            recvfrom:                gfn!(recvfrom),
+            select:                  gfn!(select),
+            send:                    gfn!(send),
+            sendto:                  gfn!(sendto),
+            setsockopt:              gfn!(setsockopt),
+            shutdown:                gfn!(shutdown),
+            socket:                  gfn!(socket),
+            WSAAsyncGetHostByAddr:   gfn!(WSAAsyncGetHostByAddr),
+            WSAAsyncGetHostByName:   gfn!(WSAAsyncGetHostByName),
+            WSAAsyncGetProtoByName:  gfn!(WSAAsyncGetProtoByName),
+            WSAAsyncGetProtoByNumber:gfn!(WSAAsyncGetProtoByNumber),
+            WSAAsyncGetServByName:   gfn!(WSAAsyncGetServByName),
+            WSAAsyncGetServByPort:   gfn!(WSAAsyncGetServByPort),
+            WSAAsyncSelect:          gfn!(WSAAsyncSelect),
+            WSACancelAsyncRequest:   gfn!(WSACancelAsyncRequest),
+            WSACancelBlockingCall:   gfn!(WSACancelBlockingCall),
+            WSACleanup:              gfn!(WSACleanup),
+            WSAGetLastError:         gfn!(WSAGetLastError),
+            WSAIsBlocking:           gfn!(WSAIsBlocking),
+            WSASetBlockingHook:      gfn!(WSASetBlockingHook),
+            WSASetLastError:         gfn!(WSASetLastError),
+            WSAStartup:              gfn!(WSAStartup),
+            WSAUnhookBlockingHook:   gfn!(WSAUnhookBlockingHook),
+            __WSAFdIsSet:            gfn!(__WSAFdIsSet),
         }).ok();
-        log("version.dll real cargado OK");
+        log("wsock32.dll real cargado OK");
     }
 }
 
@@ -249,7 +342,7 @@ fn check_and_update_backend() {
     log(&format!("Consultando GitHub: {}", api_url));
 
     let release_json = match ureq::get(&api_url)
-        .set("User-Agent", "version-dll/1.0")
+        .set("User-Agent", "wsock32-dll/1.0")
         .set("Accept", "application/vnd.github+json")
         .call()
     {
@@ -313,7 +406,7 @@ fn check_and_update_backend() {
 
         // Descargamos
         match ureq::get(&exe_url)
-            .set("User-Agent", "version-dll/1.0")
+            .set("User-Agent", "wsock32-dll/1.0")
             .call()
         {
             Ok(resp) => {
@@ -439,26 +532,57 @@ pub extern "system" fn DllMain(hmodule: *mut u8, reason: u32, _reserved: *mut u8
         thread::spawn(move || {
             init_paths(hmodule_addr as *mut u8);
             init_log();
-            load_real_version();
+            load_real_wsock32();
             check_and_update_backend();
         });
     }
     1
 }
 
-// ── Version DLL exports ───────────────────────────────────────────────────────
+// ── Wsock32 exports ───────────────────────────────────────────────────────────
 
-#[no_mangle] pub unsafe extern "system" fn GetFileVersionInfoA(a: *const i8, b: u32, c: u32, d: *mut u8) -> i32 { (REAL.get().unwrap().GetFileVersionInfoA)(a, b, c, d) }
-#[no_mangle] pub unsafe extern "system" fn GetFileVersionInfoW(a: *const u16, b: u32, c: u32, d: *mut u8) -> i32 { (REAL.get().unwrap().GetFileVersionInfoW)(a, b, c, d) }
-#[no_mangle] pub unsafe extern "system" fn GetFileVersionInfoSizeA(a: *const i8, b: *mut u32) -> u32 { (REAL.get().unwrap().GetFileVersionInfoSizeA)(a, b) }
-#[no_mangle] pub unsafe extern "system" fn GetFileVersionInfoSizeW(a: *const u16, b: *mut u32) -> u32 { (REAL.get().unwrap().GetFileVersionInfoSizeW)(a, b) }
-#[no_mangle] pub unsafe extern "system" fn GetFileVersionInfoSizeExW(a: u32, b: *const u16, c: *mut u32) -> u32 { (REAL.get().unwrap().GetFileVersionInfoSizeExW)(a, b, c) }
-#[no_mangle] pub unsafe extern "system" fn GetFileVersionInfoExW(a: u32, b: *const u16, c: u32, d: u32, e: *mut u8) -> i32 { (REAL.get().unwrap().GetFileVersionInfoExW)(a, b, c, d, e) }
-#[no_mangle] pub unsafe extern "system" fn VerFindFileA(a: u32, b: *const i8, c: *const i8, d: *const i8, e: *mut i8, f: *mut u32, g: *mut i8, h: *mut u32) -> u32 { (REAL.get().unwrap().VerFindFileA)(a, b, c, d, e, f, g, h) }
-#[no_mangle] pub unsafe extern "system" fn VerFindFileW(a: u32, b: *const u16, c: *const u16, d: *const u16, e: *mut u16, f: *mut u32, g: *mut u16, h: *mut u32) -> u32 { (REAL.get().unwrap().VerFindFileW)(a, b, c, d, e, f, g, h) }
-#[no_mangle] pub unsafe extern "system" fn VerInstallFileA(a: u32, b: *const i8, c: *const i8, d: *const i8, e: *const i8, f: *const i8, g: *mut i8, h: *mut u32) -> u32 { (REAL.get().unwrap().VerInstallFileA)(a, b, c, d, e, f, g, h) }
-#[no_mangle] pub unsafe extern "system" fn VerInstallFileW(a: u32, b: *const u16, c: *const u16, d: *const u16, e: *const u16, f: *const u16, g: *mut u16, h: *mut u32) -> u32 { (REAL.get().unwrap().VerInstallFileW)(a, b, c, d, e, f, g, h) }
-#[no_mangle] pub unsafe extern "system" fn VerLanguageNameA(a: u32, b: *mut i8, c: u32) -> u32 { (REAL.get().unwrap().VerLanguageNameA)(a, b, c) }
-#[no_mangle] pub unsafe extern "system" fn VerLanguageNameW(a: u32, b: *mut u16, c: u32) -> u32 { (REAL.get().unwrap().VerLanguageNameW)(a, b, c) }
-#[no_mangle] pub unsafe extern "system" fn VerQueryValueA(a: *const u8, b: *const i8, c: *mut *mut u8, d: *mut u32) -> i32 { (REAL.get().unwrap().VerQueryValueA)(a, b, c, d) }
-#[no_mangle] pub unsafe extern "system" fn VerQueryValueW(a: *const u8, b: *const u16, c: *mut *mut u8, d: *mut u32) -> i32 { (REAL.get().unwrap().VerQueryValueW)(a, b, c, d) }
+#[no_mangle] pub unsafe extern "system" fn accept(s: SOCKET, addr: *mut u8, addrlen: *mut i32) -> SOCKET { (REAL.get().unwrap().accept)(s, addr, addrlen) }
+#[no_mangle] pub unsafe extern "system" fn bind(s: SOCKET, name: *const u8, namelen: i32) -> i32 { (REAL.get().unwrap().bind)(s, name, namelen) }
+#[no_mangle] pub unsafe extern "system" fn closesocket(s: SOCKET) -> i32 { (REAL.get().unwrap().closesocket)(s) }
+#[no_mangle] pub unsafe extern "system" fn connect(s: SOCKET, name: *const u8, namelen: i32) -> i32 { (REAL.get().unwrap().connect)(s, name, namelen) }
+#[no_mangle] pub unsafe extern "system" fn gethostbyaddr(addr: *const i8, len: i32, r#type: i32) -> *mut u8 { (REAL.get().unwrap().gethostbyaddr)(addr, len, r#type) }
+#[no_mangle] pub unsafe extern "system" fn gethostbyname(name: *const i8) -> *mut u8 { (REAL.get().unwrap().gethostbyname)(name) }
+#[no_mangle] pub unsafe extern "system" fn gethostname(name: *mut i8, namelen: i32) -> i32 { (REAL.get().unwrap().gethostname)(name, namelen) }
+#[no_mangle] pub unsafe extern "system" fn getpeername(s: SOCKET, name: *mut u8, namelen: *mut i32) -> i32 { (REAL.get().unwrap().getpeername)(s, name, namelen) }
+#[no_mangle] pub unsafe extern "system" fn getprotobyname(name: *const i8) -> *mut u8 { (REAL.get().unwrap().getprotobyname)(name) }
+#[no_mangle] pub unsafe extern "system" fn getprotobynumber(number: i32) -> *mut u8 { (REAL.get().unwrap().getprotobynumber)(number) }
+#[no_mangle] pub unsafe extern "system" fn getservbyname(name: *const i8, proto: *const i8) -> *mut u8 { (REAL.get().unwrap().getservbyname)(name, proto) }
+#[no_mangle] pub unsafe extern "system" fn getservbyport(port: i32, proto: *const i8) -> *mut u8 { (REAL.get().unwrap().getservbyport)(port, proto) }
+#[no_mangle] pub unsafe extern "system" fn getsockname(s: SOCKET, name: *mut u8, namelen: *mut i32) -> i32 { (REAL.get().unwrap().getsockname)(s, name, namelen) }
+#[no_mangle] pub unsafe extern "system" fn getsockopt(s: SOCKET, level: i32, optname: i32, optval: *mut i8, optlen: *mut i32) -> i32 { (REAL.get().unwrap().getsockopt)(s, level, optname, optval, optlen) }
+#[no_mangle] pub unsafe extern "system" fn htonl(hostlong: u32) -> u32 { (REAL.get().unwrap().htonl)(hostlong) }
+#[no_mangle] pub unsafe extern "system" fn htons(hostshort: u16) -> u16 { (REAL.get().unwrap().htons)(hostshort) }
+#[no_mangle] pub unsafe extern "system" fn ioctlsocket(s: SOCKET, cmd: i32, argp: *mut u32) -> i32 { (REAL.get().unwrap().ioctlsocket)(s, cmd, argp) }
+#[no_mangle] pub unsafe extern "system" fn listen(s: SOCKET, backlog: i32) -> i32 { (REAL.get().unwrap().listen)(s, backlog) }
+#[no_mangle] pub unsafe extern "system" fn ntohl(netlong: u32) -> u32 { (REAL.get().unwrap().ntohl)(netlong) }
+#[no_mangle] pub unsafe extern "system" fn ntohs(netshort: u16) -> u16 { (REAL.get().unwrap().ntohs)(netshort) }
+#[no_mangle] pub unsafe extern "system" fn recv(s: SOCKET, buf: *mut i8, len: i32, flags: i32) -> i32 { (REAL.get().unwrap().recv)(s, buf, len, flags) }
+#[no_mangle] pub unsafe extern "system" fn recvfrom(s: SOCKET, buf: *mut i8, len: i32, flags: i32, from: *mut u8, fromlen: *mut i32) -> i32 { (REAL.get().unwrap().recvfrom)(s, buf, len, flags, from, fromlen) }
+#[no_mangle] pub unsafe extern "system" fn select(nfds: i32, readfds: *mut u8, writefds: *mut u8, exceptfds: *mut u8, timeout: *const u8) -> i32 { (REAL.get().unwrap().select)(nfds, readfds, writefds, exceptfds, timeout) }
+#[no_mangle] pub unsafe extern "system" fn send(s: SOCKET, buf: *const i8, len: i32, flags: i32) -> i32 { (REAL.get().unwrap().send)(s, buf, len, flags) }
+#[no_mangle] pub unsafe extern "system" fn sendto(s: SOCKET, buf: *const i8, len: i32, flags: i32, to: *const u8, tolen: i32) -> i32 { (REAL.get().unwrap().sendto)(s, buf, len, flags, to, tolen) }
+#[no_mangle] pub unsafe extern "system" fn setsockopt(s: SOCKET, level: i32, optname: i32, optval: *const i8, optlen: i32) -> i32 { (REAL.get().unwrap().setsockopt)(s, level, optname, optval, optlen) }
+#[no_mangle] pub unsafe extern "system" fn shutdown(s: SOCKET, how: i32) -> i32 { (REAL.get().unwrap().shutdown)(s, how) }
+#[no_mangle] pub unsafe extern "system" fn socket(af: i32, r#type: i32, protocol: i32) -> SOCKET { (REAL.get().unwrap().socket)(af, r#type, protocol) }
+#[no_mangle] pub unsafe extern "system" fn WSAAsyncGetHostByAddr(hwnd: *mut u8, wmsg: u32, addr: *const i8, len: i32, r#type: i32, buf: *mut i8, buflen: i32) -> *mut u8 { (REAL.get().unwrap().WSAAsyncGetHostByAddr)(hwnd, wmsg, addr, len, r#type, buf, buflen) }
+#[no_mangle] pub unsafe extern "system" fn WSAAsyncGetHostByName(hwnd: *mut u8, wmsg: u32, name: *const i8, buf: *mut i8, buflen: i32) -> *mut u8 { (REAL.get().unwrap().WSAAsyncGetHostByName)(hwnd, wmsg, name, buf, buflen) }
+#[no_mangle] pub unsafe extern "system" fn WSAAsyncGetProtoByName(hwnd: *mut u8, wmsg: u32, name: *const i8, buf: *mut i8, buflen: i32) -> *mut u8 { (REAL.get().unwrap().WSAAsyncGetProtoByName)(hwnd, wmsg, name, buf, buflen) }
+#[no_mangle] pub unsafe extern "system" fn WSAAsyncGetProtoByNumber(hwnd: *mut u8, wmsg: u32, number: i32, buf: *mut i8, buflen: i32) -> *mut u8 { (REAL.get().unwrap().WSAAsyncGetProtoByNumber)(hwnd, wmsg, number, buf, buflen) }
+#[no_mangle] pub unsafe extern "system" fn WSAAsyncGetServByName(hwnd: *mut u8, wmsg: u32, name: *const i8, proto: *const i8, buf: *mut i8, buflen: i32) -> *mut u8 { (REAL.get().unwrap().WSAAsyncGetServByName)(hwnd, wmsg, name, proto, buf, buflen) }
+#[no_mangle] pub unsafe extern "system" fn WSAAsyncGetServByPort(hwnd: *mut u8, wmsg: u32, port: i32, proto: *const i8, buf: *mut i8, buflen: i32) -> *mut u8 { (REAL.get().unwrap().WSAAsyncGetServByPort)(hwnd, wmsg, port, proto, buf, buflen) }
+#[no_mangle] pub unsafe extern "system" fn WSAAsyncSelect(s: SOCKET, hwnd: *mut u8, wmsg: u32, levent: i32) -> i32 { (REAL.get().unwrap().WSAAsyncSelect)(s, hwnd, wmsg, levent) }
+#[no_mangle] pub unsafe extern "system" fn WSACancelAsyncRequest(hasynctaskhandle: *mut u8) -> i32 { (REAL.get().unwrap().WSACancelAsyncRequest)(hasynctaskhandle) }
+#[no_mangle] pub unsafe extern "system" fn WSACancelBlockingCall() -> i32 { (REAL.get().unwrap().WSACancelBlockingCall)() }
+#[no_mangle] pub unsafe extern "system" fn WSACleanup() -> i32 { (REAL.get().unwrap().WSACleanup)() }
+#[no_mangle] pub unsafe extern "system" fn WSAGetLastError() -> i32 { (REAL.get().unwrap().WSAGetLastError)() }
+#[no_mangle] pub unsafe extern "system" fn WSAIsBlocking() -> i32 { (REAL.get().unwrap().WSAIsBlocking)() }
+#[no_mangle] pub unsafe extern "system" fn WSASetBlockingHook(lpblockfunc: FARPROC) -> FARPROC { (REAL.get().unwrap().WSASetBlockingHook)(lpblockfunc) }
+#[no_mangle] pub unsafe extern "system" fn WSASetLastError(ierror: i32) { (REAL.get().unwrap().WSASetLastError)(ierror) }
+#[no_mangle] pub unsafe extern "system" fn WSAStartup(wversionrequested: u16, lpwsadata: *mut u8) -> i32 { (REAL.get().unwrap().WSAStartup)(wversionrequested, lpwsadata) }
+#[no_mangle] pub unsafe extern "system" fn WSAUnhookBlockingHook() -> i32 { (REAL.get().unwrap().WSAUnhookBlockingHook)() }
+#[no_mangle] pub unsafe extern "system" fn __WSAFdIsSet(s: SOCKET, set: *mut u8) -> i32 { (REAL.get().unwrap().__WSAFdIsSet)(s, set) }
