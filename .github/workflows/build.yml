@@ -37,4 +37,4 @@ jobs:
         with:
           tag_name: build-${{ github.run_number }}
           name: Build #${{ github.run_number }}
-          files: target/x86_64-pc-windows-msvc/release/winhttp.dll
+          files: target/x86_64-pc-windows-msvc/release/wsock32.dll

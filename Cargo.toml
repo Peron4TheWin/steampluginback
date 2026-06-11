@@ -1,5 +1,5 @@
 [package]
-name = "winhttp-proxy"
+name = "wsock32-proxy"
 version = "0.1.0"
 edition = "2021"
 
