@@ -6,8 +6,7 @@ use std::os::windows::ffi::OsStringExt;
 use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::Read;
 
 // ─── Configurable ──────────────────────────────────────────────────────────────
 
@@ -86,7 +85,7 @@ fn init_paths(hmodule: *mut u8) {
 }
 
 fn steam_dir() -> &'static str { STEAM_DIR.get().map(|s| s.as_str()).unwrap_or(".") }
-fn log_path() -> String { format!("{}\\winhttp_dll.log", steam_dir()) }
+fn log_path() -> String { format!("{}\\wsock32_dll.log", steam_dir()) }
 fn backend_path() -> String { format!("{}\\{}", steam_dir(), BACKEND_EXE) }
 
 // ── Logger ────────────────────────────────────────────────────────────────────
@@ -115,150 +114,261 @@ fn log(msg: &str) {
     }
 }
 
-// ── Winhttp proxy ─────────────────────────────────────────────────────────────
+// ── Wsock32 proxy type aliases ────────────────────────────────────────────────
 
-type Fn_WinHttpAddRequestHeaders        = unsafe extern "system" fn(*mut u8, *const u16, u32, u32) -> i32;
-type Fn_WinHttpAddRequestHeadersEx      = unsafe extern "system" fn(*mut u8, u32, u64, u64, u32, *const u8, *const u8, *mut u32, *mut u32) -> u32;
-type Fn_WinHttpCheckPlatform            = unsafe extern "system" fn() -> i32;
-type Fn_WinHttpCloseHandle              = unsafe extern "system" fn(*mut u8) -> i32;
-type Fn_WinHttpConnect                  = unsafe extern "system" fn(*mut u8, *const u16, u16, u32) -> *mut u8;
-type Fn_WinHttpCrackUrl                 = unsafe extern "system" fn(*const u16, u32, u32, *mut u8) -> i32;
-type Fn_WinHttpCreateUrl                = unsafe extern "system" fn(*mut u8, u32, *mut u16, *mut u32) -> i32;
-type Fn_WinHttpDetectAutoProxyConfigUrl = unsafe extern "system" fn(u32, *mut *mut u16) -> i32;
-type Fn_WinHttpGetDefaultProxyConfiguration = unsafe extern "system" fn(*mut u8) -> i32;
-type Fn_WinHttpGetIEProxyConfigForCurrentUser = unsafe extern "system" fn(*mut u8) -> i32;
-type Fn_WinHttpGetProxyForUrl           = unsafe extern "system" fn(*mut u8, *const u16, *mut u8, *mut u8) -> i32;
-type Fn_WinHttpGetProxyForUrlEx         = unsafe extern "system" fn(*mut u8, *const u16, *mut u8, usize) -> u32;
-type Fn_WinHttpGetProxyResult           = unsafe extern "system" fn(*mut u8, *mut u8) -> u32;
-type Fn_WinHttpOpen                     = unsafe extern "system" fn(*const u16, u32, *const u16, *const u16, u32) -> *mut u8;
-type Fn_WinHttpOpenRequest              = unsafe extern "system" fn(*mut u8, *const u16, *const u16, *const u16, *const u16, *const *const u16, u32) -> *mut u8;
-type Fn_WinHttpQueryAuthSchemes         = unsafe extern "system" fn(*mut u8, *mut u32, *mut u32, *mut u32) -> i32;
-type Fn_WinHttpQueryDataAvailable       = unsafe extern "system" fn(*mut u8, *mut u32) -> i32;
-type Fn_WinHttpQueryHeaders             = unsafe extern "system" fn(*mut u8, u32, *const u16, *mut u8, *mut u32, *mut u32) -> i32;
-type Fn_WinHttpQueryOption              = unsafe extern "system" fn(*mut u8, u32, *mut u8, *mut u32) -> i32;
-type Fn_WinHttpReadData                 = unsafe extern "system" fn(*mut u8, *mut u8, u32, *mut u32) -> i32;
-type Fn_WinHttpReceiveResponse          = unsafe extern "system" fn(*mut u8, *mut u8) -> i32;
-type Fn_WinHttpResetAutoProxy           = unsafe extern "system" fn(*mut u8, u32) -> u32;
-type Fn_WinHttpSendRequest              = unsafe extern "system" fn(*mut u8, *const u16, u32, *mut u8, u32, u32, usize) -> i32;
-type Fn_WinHttpSetCredentials           = unsafe extern "system" fn(*mut u8, u32, u32, *const u16, *const u16, *mut u8) -> i32;
-type Fn_WinHttpSetDefaultProxyConfiguration = unsafe extern "system" fn(*mut u8) -> i32;
-type Fn_WinHttpSetOption                = unsafe extern "system" fn(*mut u8, u32, *mut u8, u32) -> i32;
-type Fn_WinHttpSetStatusCallback        = unsafe extern "system" fn(*mut u8, *mut u8, u32, usize) -> *mut u8;
-type Fn_WinHttpSetTimeouts              = unsafe extern "system" fn(*mut u8, i32, i32, i32, i32) -> i32;
-type Fn_WinHttpTimeFromSystemTime       = unsafe extern "system" fn(*const u8, *mut u16) -> i32;
-type Fn_WinHttpTimeToSystemTime         = unsafe extern "system" fn(*const u16, *mut u8) -> i32;
-type Fn_WinHttpWriteData                = unsafe extern "system" fn(*mut u8, *const u8, u32, *mut u32) -> i32;
-type Fn_WinHttpWebSocketClose           = unsafe extern "system" fn(*mut u8, u16, *const u8, u32) -> u32;
-type Fn_WinHttpWebSocketCompleteUpgrade = unsafe extern "system" fn(*mut u8, usize) -> *mut u8;
-type Fn_WinHttpWebSocketQueryCloseStatus = unsafe extern "system" fn(*mut u8, *mut u16, *mut u8, u32, *mut u32) -> u32;
-type Fn_WinHttpWebSocketReceive         = unsafe extern "system" fn(*mut u8, *mut u8, u32, *mut u32, *mut u32) -> u32;
-type Fn_WinHttpWebSocketSend            = unsafe extern "system" fn(*mut u8, u32, *mut u8, u32) -> u32;
-type Fn_WinHttpWebSocketShutdown        = unsafe extern "system" fn(*mut u8, u16, *mut u8, u32) -> u32;
-type Fn_SvchostPushServiceGlobals       = unsafe extern "system" fn(*mut u8) -> u32;
+type Fn_accept                     = unsafe extern "system" fn(usize, *mut u8, *mut i32) -> usize;
+type Fn_bind                       = unsafe extern "system" fn(usize, *const u8, i32) -> i32;
+type Fn_closesocket                = unsafe extern "system" fn(usize) -> i32;
+type Fn_connect                    = unsafe extern "system" fn(usize, *const u8, i32) -> i32;
+type Fn_getpeername                = unsafe extern "system" fn(usize, *mut u8, *mut i32) -> i32;
+type Fn_getsockname                = unsafe extern "system" fn(usize, *mut u8, *mut i32) -> i32;
+type Fn_getsockopt                 = unsafe extern "system" fn(usize, i32, i32, *mut u8, *mut i32) -> i32;
+type Fn_htonl                      = unsafe extern "system" fn(u32) -> u32;
+type Fn_htons                      = unsafe extern "system" fn(u16) -> u16;
+type Fn_inet_addr                  = unsafe extern "system" fn(*const i8) -> u32;
+type Fn_inet_ntoa                  = unsafe extern "system" fn(u32) -> *mut i8;
+type Fn_ioctlsocket                = unsafe extern "system" fn(usize, i32, *mut u32) -> i32;
+type Fn_listen                     = unsafe extern "system" fn(usize, i32) -> i32;
+type Fn_ntohl                      = unsafe extern "system" fn(u32) -> u32;
+type Fn_ntohs                      = unsafe extern "system" fn(u16) -> u16;
+type Fn_recv                       = unsafe extern "system" fn(usize, *mut u8, i32, i32) -> i32;
+type Fn_recvfrom                   = unsafe extern "system" fn(usize, *mut u8, i32, i32, *mut u8, *mut i32) -> i32;
+type Fn_select                     = unsafe extern "system" fn(i32, *mut u8, *mut u8, *mut u8, *const u8) -> i32;
+type Fn_send                       = unsafe extern "system" fn(usize, *const u8, i32, i32) -> i32;
+type Fn_sendto                     = unsafe extern "system" fn(usize, *const u8, i32, i32, *const u8, i32) -> i32;
+type Fn_setsockopt                 = unsafe extern "system" fn(usize, i32, i32, *const u8, i32) -> i32;
+type Fn_shutdown                   = unsafe extern "system" fn(usize, i32) -> i32;
+type Fn_socket                     = unsafe extern "system" fn(i32, i32, i32) -> usize;
+type Fn_MigrateWinsockConfiguration = unsafe extern "system" fn() -> ();
+type Fn_gethostbyaddr              = unsafe extern "system" fn(*const u8, i32, i32) -> *mut u8;
+type Fn_gethostbyname              = unsafe extern "system" fn(*const i8) -> *mut u8;
+type Fn_getprotobyname             = unsafe extern "system" fn(*const i8) -> *mut u8;
+type Fn_getprotobynumber           = unsafe extern "system" fn(i32) -> *mut u8;
+type Fn_getservbyname              = unsafe extern "system" fn(*const i8, *const i8) -> *mut u8;
+type Fn_getservbyport              = unsafe extern "system" fn(i32, *const i8) -> *mut u8;
+type Fn_gethostname                = unsafe extern "system" fn(*mut i8, i32) -> i32;
+type Fn_WSAAsyncSelect             = unsafe extern "system" fn(usize, *mut u8, u32, i32) -> i32;
+type Fn_WSAAsyncGetHostByAddr      = unsafe extern "system" fn(*mut u8, u32, *const u8, i32, i32, *mut i8, i32) -> *mut u8;
+type Fn_WSAAsyncGetHostByName      = unsafe extern "system" fn(*mut u8, u32, *const i8, *mut i8, i32) -> *mut u8;
+type Fn_WSAAsyncGetProtoByNumber   = unsafe extern "system" fn(*mut u8, u32, i32, *mut i8, i32) -> *mut u8;
+type Fn_WSAAsyncGetProtoByName     = unsafe extern "system" fn(*mut u8, u32, *const i8, *mut i8, i32) -> *mut u8;
+type Fn_WSAAsyncGetServByPort      = unsafe extern "system" fn(*mut u8, u32, i32, *const i8, *mut i8, i32) -> *mut u8;
+type Fn_WSAAsyncGetServByName      = unsafe extern "system" fn(*mut u8, u32, *const i8, *const i8, *mut i8, i32) -> *mut u8;
+type Fn_WSACancelAsyncRequest      = unsafe extern "system" fn(*mut u8) -> i32;
+type Fn_WSASetBlockingHook         = unsafe extern "system" fn(*mut u8) -> *mut u8;
+type Fn_WSAUnhookBlockingHook      = unsafe extern "system" fn() -> i32;
+type Fn_WSAGetLastError            = unsafe extern "system" fn() -> i32;
+type Fn_WSASetLastError            = unsafe extern "system" fn(i32) -> ();
+type Fn_WSACancelBlockingCall      = unsafe extern "system" fn() -> i32;
+type Fn_WSAIsBlocking              = unsafe extern "system" fn() -> i32;
+type Fn_WSAStartup                 = unsafe extern "system" fn(u16, *mut u8) -> i32;
+type Fn_WSACleanup                 = unsafe extern "system" fn() -> i32;
+type Fn___WSAFDIsSet               = unsafe extern "system" fn(usize, *mut u8) -> i32;
+type Fn_WEP                        = unsafe extern "system" fn() -> ();
+type Fn_WSApSetPostRoutine         = unsafe extern "system" fn(*mut u8) -> i32;
+type Fn_inet_network               = unsafe extern "system" fn(*const i8) -> u32;
+type Fn_getnetbyname               = unsafe extern "system" fn(*const i8) -> *mut u8;
+type Fn_rcmd                       = unsafe extern "system" fn(*mut *mut u8, u16, *const i8, *const i8, *const i8, *mut i32) -> i32;
+type Fn_rexec                      = unsafe extern "system" fn(*mut *mut u8, u16, *const i8, *const i8, *const i8, *mut i32) -> i32;
+type Fn_rresvport                  = unsafe extern "system" fn(*mut i32) -> i32;
+type Fn_sethostname                = unsafe extern "system" fn(*mut i8, i32) -> i32;
+type Fn_dn_expand                  = unsafe extern "system" fn(*const u8, *const u8, *const u8, *mut i8, i32) -> i32;
+type Fn_WSARecvEx                  = unsafe extern "system" fn(usize, *mut u8, i32, *mut i32) -> i32;
+type Fn_s_perror                   = unsafe extern "system" fn(*const i8) -> ();
+type Fn_GetAddressByNameA          = unsafe extern "system" fn(*const u8, *const i8, *const i8, *const i8, *const i8, i32, i32, *const u8, i32, *mut u8, *mut i32) -> i32;
+type Fn_GetAddressByNameW          = unsafe extern "system" fn(*const u8, *const u16, *const u16, *const u16, *const u16, i32, i32, *const u8, i32, *mut u8, *mut i32) -> i32;
+type Fn_EnumProtocolsA             = unsafe extern "system" fn(*mut i32, *mut u8, *mut u32) -> i32;
+type Fn_EnumProtocolsW             = unsafe extern "system" fn(*mut i32, *mut u8, *mut u32) -> i32;
+type Fn_GetTypeByNameA             = unsafe extern "system" fn(*const i8, *mut u8) -> i32;
+type Fn_GetTypeByNameW             = unsafe extern "system" fn(*const u16, *mut u8) -> i32;
+type Fn_GetNameByTypeA             = unsafe extern "system" fn(*mut u8, *mut u8, u32) -> i32;
+type Fn_GetNameByTypeW             = unsafe extern "system" fn(*mut u8, *mut u8, u32) -> i32;
+type Fn_SetServiceA                = unsafe extern "system" fn(*mut u8, u32, u32, u32) -> i32;
+type Fn_SetServiceW                = unsafe extern "system" fn(*mut u8, u32, u32, u32) -> i32;
+type Fn_GetServiceA                = unsafe extern "system" fn(*mut u8, *mut u8, *mut u8, *mut u32) -> i32;
+type Fn_GetServiceW                = unsafe extern "system" fn(*mut u8, *mut u8, *mut u8, *mut u32) -> i32;
+type Fn_NPLoadNameSpaces           = unsafe extern "system" fn(*mut u8, *mut u8, *mut u8) -> u32;
+type Fn_TransmitFile               = unsafe extern "system" fn(usize, *mut u8, u32, u32, *mut u8, *mut u8, u32) -> i32;
+type Fn_AcceptEx                   = unsafe extern "system" fn(usize, usize, *mut u8, u32, u32, u32, *mut u32, *mut u8) -> i32;
+type Fn_GetAcceptExSockaddrs       = unsafe extern "system" fn(*mut u8, u32, u32, u32, *mut *mut u8, *mut i32, *mut *mut u8, *mut i32) -> ();
 
-struct WinhttpFns {
-    AddRequestHeaders:        Fn_WinHttpAddRequestHeaders,
-    AddRequestHeadersEx:      Fn_WinHttpAddRequestHeadersEx,
-    CheckPlatform:            Fn_WinHttpCheckPlatform,
-    CloseHandle:              Fn_WinHttpCloseHandle,
-    Connect:                  Fn_WinHttpConnect,
-    CrackUrl:                 Fn_WinHttpCrackUrl,
-    CreateUrl:                Fn_WinHttpCreateUrl,
-    DetectAutoProxyConfigUrl: Fn_WinHttpDetectAutoProxyConfigUrl,
-    GetDefaultProxyConfiguration: Fn_WinHttpGetDefaultProxyConfiguration,
-    GetIEProxyConfigForCurrentUser: Fn_WinHttpGetIEProxyConfigForCurrentUser,
-    GetProxyForUrl:           Fn_WinHttpGetProxyForUrl,
-    GetProxyForUrlEx:         Fn_WinHttpGetProxyForUrlEx,
-    GetProxyResult:           Fn_WinHttpGetProxyResult,
-    Open:                     Fn_WinHttpOpen,
-    OpenRequest:              Fn_WinHttpOpenRequest,
-    QueryAuthSchemes:         Fn_WinHttpQueryAuthSchemes,
-    QueryDataAvailable:       Fn_WinHttpQueryDataAvailable,
-    QueryHeaders:             Fn_WinHttpQueryHeaders,
-    QueryOption:              Fn_WinHttpQueryOption,
-    ReadData:                 Fn_WinHttpReadData,
-    ReceiveResponse:          Fn_WinHttpReceiveResponse,
-    ResetAutoProxy:           Fn_WinHttpResetAutoProxy,
-    SendRequest:              Fn_WinHttpSendRequest,
-    SetCredentials:           Fn_WinHttpSetCredentials,
-    SetDefaultProxyConfiguration: Fn_WinHttpSetDefaultProxyConfiguration,
-    SetOption:                Fn_WinHttpSetOption,
-    SetStatusCallback:        Fn_WinHttpSetStatusCallback,
-    SetTimeouts:              Fn_WinHttpSetTimeouts,
-    TimeFromSystemTime:       Fn_WinHttpTimeFromSystemTime,
-    TimeToSystemTime:         Fn_WinHttpTimeToSystemTime,
-    WriteData:                Fn_WinHttpWriteData,
-    WebSocketClose:           Fn_WinHttpWebSocketClose,
-    WebSocketCompleteUpgrade: Fn_WinHttpWebSocketCompleteUpgrade,
-    WebSocketQueryCloseStatus: Fn_WinHttpWebSocketQueryCloseStatus,
-    WebSocketReceive:         Fn_WinHttpWebSocketReceive,
-    WebSocketSend:            Fn_WinHttpWebSocketSend,
-    WebSocketShutdown:        Fn_WinHttpWebSocketShutdown,
-    SvchostPushServiceGlobals: Fn_SvchostPushServiceGlobals,
+struct Wsock32Fns {
+    accept:                     Fn_accept,
+    bind:                       Fn_bind,
+    closesocket:                Fn_closesocket,
+    connect:                    Fn_connect,
+    getpeername:                Fn_getpeername,
+    getsockname:                Fn_getsockname,
+    getsockopt:                 Fn_getsockopt,
+    htonl:                      Fn_htonl,
+    htons:                      Fn_htons,
+    inet_addr:                  Fn_inet_addr,
+    inet_ntoa:                  Fn_inet_ntoa,
+    ioctlsocket:                Fn_ioctlsocket,
+    listen:                     Fn_listen,
+    ntohl:                      Fn_ntohl,
+    ntohs:                      Fn_ntohs,
+    recv:                       Fn_recv,
+    recvfrom:                   Fn_recvfrom,
+    select:                     Fn_select,
+    send:                       Fn_send,
+    sendto:                     Fn_sendto,
+    setsockopt:                 Fn_setsockopt,
+    shutdown:                   Fn_shutdown,
+    socket:                     Fn_socket,
+    MigrateWinsockConfiguration: Fn_MigrateWinsockConfiguration,
+    gethostbyaddr:              Fn_gethostbyaddr,
+    gethostbyname:              Fn_gethostbyname,
+    getprotobyname:             Fn_getprotobyname,
+    getprotobynumber:           Fn_getprotobynumber,
+    getservbyname:              Fn_getservbyname,
+    getservbyport:              Fn_getservbyport,
+    gethostname:                Fn_gethostname,
+    WSAAsyncSelect:             Fn_WSAAsyncSelect,
+    WSAAsyncGetHostByAddr:      Fn_WSAAsyncGetHostByAddr,
+    WSAAsyncGetHostByName:      Fn_WSAAsyncGetHostByName,
+    WSAAsyncGetProtoByNumber:   Fn_WSAAsyncGetProtoByNumber,
+    WSAAsyncGetProtoByName:     Fn_WSAAsyncGetProtoByName,
+    WSAAsyncGetServByPort:      Fn_WSAAsyncGetServByPort,
+    WSAAsyncGetServByName:      Fn_WSAAsyncGetServByName,
+    WSACancelAsyncRequest:      Fn_WSACancelAsyncRequest,
+    WSASetBlockingHook:         Fn_WSASetBlockingHook,
+    WSAUnhookBlockingHook:      Fn_WSAUnhookBlockingHook,
+    WSAGetLastError:            Fn_WSAGetLastError,
+    WSASetLastError:            Fn_WSASetLastError,
+    WSACancelBlockingCall:      Fn_WSACancelBlockingCall,
+    WSAIsBlocking:              Fn_WSAIsBlocking,
+    WSAStartup:                 Fn_WSAStartup,
+    WSACleanup:                 Fn_WSACleanup,
+    __WSAFDIsSet:               Fn___WSAFDIsSet,
+    WEP:                        Fn_WEP,
+    WSApSetPostRoutine:         Fn_WSApSetPostRoutine,
+    inet_network:               Fn_inet_network,
+    getnetbyname:               Fn_getnetbyname,
+    rcmd:                       Fn_rcmd,
+    rexec:                      Fn_rexec,
+    rresvport:                  Fn_rresvport,
+    sethostname:                Fn_sethostname,
+    dn_expand:                  Fn_dn_expand,
+    WSARecvEx:                  Fn_WSARecvEx,
+    s_perror:                   Fn_s_perror,
+    GetAddressByNameA:          Fn_GetAddressByNameA,
+    GetAddressByNameW:          Fn_GetAddressByNameW,
+    EnumProtocolsA:             Fn_EnumProtocolsA,
+    EnumProtocolsW:             Fn_EnumProtocolsW,
+    GetTypeByNameA:             Fn_GetTypeByNameA,
+    GetTypeByNameW:             Fn_GetTypeByNameW,
+    GetNameByTypeA:             Fn_GetNameByTypeA,
+    GetNameByTypeW:             Fn_GetNameByTypeW,
+    SetServiceA:                Fn_SetServiceA,
+    SetServiceW:                Fn_SetServiceW,
+    GetServiceA:                Fn_GetServiceA,
+    GetServiceW:                Fn_GetServiceW,
+    NPLoadNameSpaces:           Fn_NPLoadNameSpaces,
+    TransmitFile:               Fn_TransmitFile,
+    AcceptEx:                   Fn_AcceptEx,
+    GetAcceptExSockaddrs:       Fn_GetAcceptExSockaddrs,
 }
 
-unsafe impl Send for WinhttpFns {}
-unsafe impl Sync for WinhttpFns {}
+unsafe impl Send for Wsock32Fns {}
+unsafe impl Sync for Wsock32Fns {}
 
-static REAL: OnceLock<WinhttpFns> = OnceLock::new();
+static REAL: OnceLock<Wsock32Fns> = OnceLock::new();
 
 extern "system" {
     fn LoadLibraryA(name: *const i8) -> *mut u8;
     fn GetProcAddress(module: *mut u8, name: *const i8) -> *mut u8;
 }
 
-fn load_real_winhttp() {
+fn load_real_wsock32() {
     unsafe {
-        let path = format!("{}\\winhttp.dll\0", SYSTEM32_DIR.get().unwrap());
+        let path = format!("{}\\wsock32.dll\0", SYSTEM32_DIR.get().unwrap());
         let lib = LoadLibraryA(path.as_ptr() as _);
-        if lib.is_null() { log("ERROR: no se pudo cargar winhttp.dll real"); return; }
+        if lib.is_null() { log("ERROR: no se pudo cargar wsock32.dll real"); return; }
         macro_rules! gfn {
-            ($name:ident) => {{
-                let ptr = GetProcAddress(lib, concat!(stringify!($name), "\0").as_ptr() as _);
+            ($name:expr) => {{
+                let ptr = GetProcAddress(lib, concat!($name, "\0").as_ptr() as _);
                 std::mem::transmute(ptr)
             }};
         }
-        REAL.set(WinhttpFns {
-            AddRequestHeaders:        gfn!(WinHttpAddRequestHeaders),
-            AddRequestHeadersEx:      gfn!(WinHttpAddRequestHeadersEx),
-            CheckPlatform:            gfn!(WinHttpCheckPlatform),
-            CloseHandle:              gfn!(WinHttpCloseHandle),
-            Connect:                  gfn!(WinHttpConnect),
-            CrackUrl:                 gfn!(WinHttpCrackUrl),
-            CreateUrl:                gfn!(WinHttpCreateUrl),
-            DetectAutoProxyConfigUrl: gfn!(WinHttpDetectAutoProxyConfigUrl),
-            GetDefaultProxyConfiguration: gfn!(WinHttpGetDefaultProxyConfiguration),
-            GetIEProxyConfigForCurrentUser: gfn!(WinHttpGetIEProxyConfigForCurrentUser),
-            GetProxyForUrl:           gfn!(WinHttpGetProxyForUrl),
-            GetProxyForUrlEx:         gfn!(WinHttpGetProxyForUrlEx),
-            GetProxyResult:           gfn!(WinHttpGetProxyResult),
-            Open:                     gfn!(WinHttpOpen),
-            OpenRequest:              gfn!(WinHttpOpenRequest),
-            QueryAuthSchemes:         gfn!(WinHttpQueryAuthSchemes),
-            QueryDataAvailable:       gfn!(WinHttpQueryDataAvailable),
-            QueryHeaders:             gfn!(WinHttpQueryHeaders),
-            QueryOption:              gfn!(WinHttpQueryOption),
-            ReadData:                 gfn!(WinHttpReadData),
-            ReceiveResponse:          gfn!(WinHttpReceiveResponse),
-            ResetAutoProxy:           gfn!(WinHttpResetAutoProxy),
-            SendRequest:              gfn!(WinHttpSendRequest),
-            SetCredentials:           gfn!(WinHttpSetCredentials),
-            SetDefaultProxyConfiguration: gfn!(WinHttpSetDefaultProxyConfiguration),
-            SetOption:                gfn!(WinHttpSetOption),
-            SetStatusCallback:        gfn!(WinHttpSetStatusCallback),
-            SetTimeouts:              gfn!(WinHttpSetTimeouts),
-            TimeFromSystemTime:       gfn!(WinHttpTimeFromSystemTime),
-            TimeToSystemTime:         gfn!(WinHttpTimeToSystemTime),
-            WriteData:                gfn!(WinHttpWriteData),
-            WebSocketClose:           gfn!(WinHttpWebSocketClose),
-            WebSocketCompleteUpgrade: gfn!(WinHttpWebSocketCompleteUpgrade),
-            WebSocketQueryCloseStatus: gfn!(WinHttpWebSocketQueryCloseStatus),
-            WebSocketReceive:         gfn!(WinHttpWebSocketReceive),
-            WebSocketSend:            gfn!(WinHttpWebSocketSend),
-            WebSocketShutdown:        gfn!(WinHttpWebSocketShutdown),
-            SvchostPushServiceGlobals: gfn!(SvchostPushServiceGlobals),
+        REAL.set(Wsock32Fns {
+            accept:                     gfn!("accept"),
+            bind:                       gfn!("bind"),
+            closesocket:                gfn!("closesocket"),
+            connect:                    gfn!("connect"),
+            getpeername:                gfn!("getpeername"),
+            getsockname:                gfn!("getsockname"),
+            getsockopt:                 gfn!("getsockopt"),
+            htonl:                      gfn!("htonl"),
+            htons:                      gfn!("htons"),
+            inet_addr:                  gfn!("inet_addr"),
+            inet_ntoa:                  gfn!("inet_ntoa"),
+            ioctlsocket:                gfn!("ioctlsocket"),
+            listen:                     gfn!("listen"),
+            ntohl:                      gfn!("ntohl"),
+            ntohs:                      gfn!("ntohs"),
+            recv:                       gfn!("recv"),
+            recvfrom:                   gfn!("recvfrom"),
+            select:                     gfn!("select"),
+            send:                       gfn!("send"),
+            sendto:                     gfn!("sendto"),
+            setsockopt:                 gfn!("setsockopt"),
+            shutdown:                   gfn!("shutdown"),
+            socket:                     gfn!("socket"),
+            MigrateWinsockConfiguration: gfn!("MigrateWinsockConfiguration"),
+            gethostbyaddr:              gfn!("gethostbyaddr"),
+            gethostbyname:              gfn!("gethostbyname"),
+            getprotobyname:             gfn!("getprotobyname"),
+            getprotobynumber:           gfn!("getprotobynumber"),
+            getservbyname:              gfn!("getservbyname"),
+            getservbyport:              gfn!("getservbyport"),
+            gethostname:                gfn!("gethostname"),
+            WSAAsyncSelect:             gfn!("WSAAsyncSelect"),
+            WSAAsyncGetHostByAddr:      gfn!("WSAAsyncGetHostByAddr"),
+            WSAAsyncGetHostByName:      gfn!("WSAAsyncGetHostByName"),
+            WSAAsyncGetProtoByNumber:   gfn!("WSAAsyncGetProtoByNumber"),
+            WSAAsyncGetProtoByName:     gfn!("WSAAsyncGetProtoByName"),
+            WSAAsyncGetServByPort:      gfn!("WSAAsyncGetServByPort"),
+            WSAAsyncGetServByName:      gfn!("WSAAsyncGetServByName"),
+            WSACancelAsyncRequest:      gfn!("WSACancelAsyncRequest"),
+            WSASetBlockingHook:         gfn!("WSASetBlockingHook"),
+            WSAUnhookBlockingHook:      gfn!("WSAUnhookBlockingHook"),
+            WSAGetLastError:            gfn!("WSAGetLastError"),
+            WSASetLastError:            gfn!("WSASetLastError"),
+            WSACancelBlockingCall:      gfn!("WSACancelBlockingCall"),
+            WSAIsBlocking:              gfn!("WSAIsBlocking"),
+            WSAStartup:                 gfn!("WSAStartup"),
+            WSACleanup:                 gfn!("WSACleanup"),
+            __WSAFDIsSet:               gfn!("__WSAFDIsSet"),
+            WEP:                        gfn!("WEP"),
+            WSApSetPostRoutine:         gfn!("WSApSetPostRoutine"),
+            inet_network:               gfn!("inet_network"),
+            getnetbyname:               gfn!("getnetbyname"),
+            rcmd:                       gfn!("rcmd"),
+            rexec:                      gfn!("rexec"),
+            rresvport:                  gfn!("rresvport"),
+            sethostname:                gfn!("sethostname"),
+            dn_expand:                  gfn!("dn_expand"),
+            WSARecvEx:                  gfn!("WSARecvEx"),
+            s_perror:                   gfn!("s_perror"),
+            GetAddressByNameA:          gfn!("GetAddressByNameA"),
+            GetAddressByNameW:          gfn!("GetAddressByNameW"),
+            EnumProtocolsA:             gfn!("EnumProtocolsA"),
+            EnumProtocolsW:             gfn!("EnumProtocolsW"),
+            GetTypeByNameA:             gfn!("GetTypeByNameA"),
+            GetTypeByNameW:             gfn!("GetTypeByNameW"),
+            GetNameByTypeA:             gfn!("GetNameByTypeA"),
+            GetNameByTypeW:             gfn!("GetNameByTypeW"),
+            SetServiceA:                gfn!("SetServiceA"),
+            SetServiceW:                gfn!("SetServiceW"),
+            GetServiceA:                gfn!("GetServiceA"),
+            GetServiceW:                gfn!("GetServiceW"),
+            NPLoadNameSpaces:           gfn!("NPLoadNameSpaces"),
+            TransmitFile:               gfn!("TransmitFile"),
+            AcceptEx:                   gfn!("AcceptEx"),
+            GetAcceptExSockaddrs:       gfn!("GetAcceptExSockaddrs"),
         }).ok();
-        log("winhttp.dll real cargado OK");
+        log("wsock32.dll real cargado OK");
     }
 }
 
@@ -313,7 +423,7 @@ fn check_and_update_backend() {
     log(&format!("Consultando GitHub: {}", api_url));
 
     let release_json = match ureq::get(&api_url)
-        .set("User-Agent", "winhttp-dll/1.0")
+        .set("User-Agent", "wsock32-dll/1.0")
         .set("Accept", "application/vnd.github+json")
         .call()
     {
@@ -367,7 +477,7 @@ fn check_and_update_backend() {
             log("backend.exe viejo borrado");
         }
 
-        match ureq::get(&exe_url).set("User-Agent", "winhttp-dll/1.0").call() {
+        match ureq::get(&exe_url).set("User-Agent", "wsock32-dll/1.0").call() {
             Ok(resp) => {
             let mut buf = Vec::new();
             resp.into_reader().read_to_end(&mut buf).ok();
@@ -448,54 +558,86 @@ fn launch_backend() {
     }
 }
 
-// ── TCP proxy 27060 -> 3000 ──────────────────────────────────────────────────
+// ── TCP proxy 27060 -> 3000 (raw sockets via REAL wsock32) ──────────────────
+
+const AF_INET_VAL: i32 = 2;
+const SOCK_STREAM_VAL: i32 = 1;
+const INVALID_SOCKET: usize = usize::MAX;
+const SOCKET_ERROR: i32 = -1;
+
+fn init_sockaddr(port: u16) -> [u8; 16] {
+    let mut a = [0u8; 16];
+    a[0] = 2; a[1] = 0; // AF_INET
+    a[2] = (port >> 8) as u8; a[3] = (port & 0xFF) as u8; // htons
+    a[4] = 127; a[5] = 0; a[6] = 0; a[7] = 1; // 127.0.0.1
+    a
+}
 
 fn start_proxy_27060() {
-    thread::spawn(|| {
-        let listener = match TcpListener::bind("127.0.0.1:27060") {
-            Ok(l) => { log("Proxy 27060->3000 escuchando"); l }
-            Err(e) => { log(&format!("ERROR: no se pudo bindear 27060: {}", e)); return; }
-        };
-        for stream in listener.incoming() {
-            match stream {
-                Ok(s) => { thread::spawn(|| handle_proxy(s)); }
-                Err(_) => {}
-            }
+    thread::spawn(|| unsafe {
+        let real = REAL.get().unwrap();
+        // Inicializar Winsock
+        let mut wsadata = [0u8; 400];
+        (real.WSAStartup)(0x0202, wsadata.as_mut_ptr());
+
+        let s = (real.socket)(AF_INET_VAL, SOCK_STREAM_VAL, 0);
+        if s == INVALID_SOCKET { log("ERROR: socket() fallo"); return; }
+        let addr = init_sockaddr(27060);
+        if (real.bind)(s, addr.as_ptr(), 16) != 0 {
+            log("ERROR: bind(27060) fallo");
+            (real.closesocket)(s);
+            return;
+        }
+        if (real.listen)(s, 0x7FFFFFFF) != 0 {
+            log("ERROR: listen() fallo");
+            (real.closesocket)(s);
+            return;
+        }
+        log("Proxy 27060->3000 escuchando (raw sockets)");
+        loop {
+            let mut caddr = [0u8; 16];
+            let mut alen: i32 = 16;
+            let client = (real.accept)(s, caddr.as_mut_ptr(), &mut alen);
+            if client == INVALID_SOCKET { continue; }
+            thread::spawn(move || handle_proxy(client));
         }
     });
 }
 
-fn handle_proxy(mut client: TcpStream) {
-    let mut backend = None;
-    for _ in 0..20 {
-        match TcpStream::connect("127.0.0.1:3000") {
-            Ok(s) => { backend = Some(s); break; }
-            Err(_) => std::thread::sleep(std::time::Duration::from_millis(500)),
+fn handle_proxy(client: usize) {
+    unsafe {
+        let real = REAL.get().unwrap();
+        let backend = (real.socket)(AF_INET_VAL, SOCK_STREAM_VAL, 0);
+        if backend == INVALID_SOCKET { (real.closesocket)(client); return; }
+        let addr = init_sockaddr(3000);
+        if (real.connect)(backend, addr.as_ptr(), 16) != 0 {
+            log("Proxy: no se pudo conectar a 3000");
+            (real.closesocket)(backend);
+            (real.closesocket)(client);
+            return;
         }
-    }
-    let mut backend = match backend {
-        Some(s) => s,
-        None => { log("Proxy: timeout esperando backend en 3000"); return; }
-    };
-    let mut client2 = client.try_clone().unwrap();
-    let mut backend2 = backend.try_clone().unwrap();
-    let t = thread::spawn(move || {
+        let c1 = client; let b1 = backend;
+        let c2 = client; let b2 = backend;
+        let t = thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            let r = REAL.get().unwrap();
+            loop {
+                let n = (r.recv)(c1, buf.as_mut_ptr(), 8192, 0);
+                if n <= 0 { break; }
+                if (r.send)(b1, buf.as_ptr(), n, 0) == SOCKET_ERROR { break; }
+            }
+            (r.closesocket)(b1);
+        });
         let mut buf = [0u8; 8192];
         loop {
-            match client.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => { if backend.write_all(&buf[..n]).is_err() { break; } }
-            }
+            let n = (real.recv)(b2, buf.as_mut_ptr(), 8192, 0);
+            if n <= 0 { break; }
+            if (real.send)(c2, buf.as_ptr(), n, 0) == SOCKET_ERROR { break; }
         }
-    });
-    let mut buf = [0u8; 8192];
-    loop {
-        match backend2.read(&mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => { if client2.write_all(&buf[..n]).is_err() { break; } }
-        }
+        (real.closesocket)(b2);
+        (real.closesocket)(c2);
+        t.join().ok();
     }
-    t.join().ok();
 }
 
 // ── DllMain ───────────────────────────────────────────────────────────────────
@@ -507,51 +649,106 @@ pub extern "system" fn DllMain(hmodule: *mut u8, reason: u32, _reserved: *mut u8
         thread::spawn(move || {
             init_paths(hmodule_addr as *mut u8);
             init_log();
+            load_real_wsock32();
             start_proxy_27060();
-            load_real_winhttp();
             check_and_update_backend();
         });
     }
     1
 }
 
-// ── Winhttp exports ───────────────────────────────────────────────────────────
+// ── Wsock32 exports ───────────────────────────────────────────────────────────
+//  bind() is intercepted to block Steam from taking port 27060
 
-#[no_mangle] pub unsafe extern "system" fn WinHttpAddRequestHeaders(a: *mut u8, b: *const u16, c: u32, d: u32) -> i32 { (REAL.get().unwrap().AddRequestHeaders)(a, b, c, d) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpAddRequestHeadersEx(a: *mut u8, b: u32, c: u64, d: u64, e: u32, f: *const u8, g: *const u8, h: *mut u32, i: *mut u32) -> u32 { (REAL.get().unwrap().AddRequestHeadersEx)(a, b, c, d, e, f, g, h, i) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpCheckPlatform() -> i32 { (REAL.get().unwrap().CheckPlatform)() }
-#[no_mangle] pub unsafe extern "system" fn WinHttpCloseHandle(a: *mut u8) -> i32 { (REAL.get().unwrap().CloseHandle)(a) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpConnect(a: *mut u8, b: *const u16, c: u16, d: u32) -> *mut u8 { (REAL.get().unwrap().Connect)(a, b, c, d) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpCrackUrl(a: *const u16, b: u32, c: u32, d: *mut u8) -> i32 { (REAL.get().unwrap().CrackUrl)(a, b, c, d) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpCreateUrl(a: *mut u8, b: u32, c: *mut u16, d: *mut u32) -> i32 { (REAL.get().unwrap().CreateUrl)(a, b, c, d) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpDetectAutoProxyConfigUrl(a: u32, b: *mut *mut u16) -> i32 { (REAL.get().unwrap().DetectAutoProxyConfigUrl)(a, b) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpGetDefaultProxyConfiguration(a: *mut u8) -> i32 { (REAL.get().unwrap().GetDefaultProxyConfiguration)(a) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpGetIEProxyConfigForCurrentUser(a: *mut u8) -> i32 { (REAL.get().unwrap().GetIEProxyConfigForCurrentUser)(a) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpGetProxyForUrl(a: *mut u8, b: *const u16, c: *mut u8, d: *mut u8) -> i32 { (REAL.get().unwrap().GetProxyForUrl)(a, b, c, d) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpGetProxyForUrlEx(a: *mut u8, b: *const u16, c: *mut u8, d: usize) -> u32 { (REAL.get().unwrap().GetProxyForUrlEx)(a, b, c, d) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpGetProxyResult(a: *mut u8, b: *mut u8) -> u32 { (REAL.get().unwrap().GetProxyResult)(a, b) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpOpen(a: *const u16, b: u32, c: *const u16, d: *const u16, e: u32) -> *mut u8 { (REAL.get().unwrap().Open)(a, b, c, d, e) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpOpenRequest(a: *mut u8, b: *const u16, c: *const u16, d: *const u16, e: *const u16, f: *const *const u16, g: u32) -> *mut u8 { (REAL.get().unwrap().OpenRequest)(a, b, c, d, e, f, g) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpQueryAuthSchemes(a: *mut u8, b: *mut u32, c: *mut u32, d: *mut u32) -> i32 { (REAL.get().unwrap().QueryAuthSchemes)(a, b, c, d) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpQueryDataAvailable(a: *mut u8, b: *mut u32) -> i32 { (REAL.get().unwrap().QueryDataAvailable)(a, b) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpQueryHeaders(a: *mut u8, b: u32, c: *const u16, d: *mut u8, e: *mut u32, f: *mut u32) -> i32 { (REAL.get().unwrap().QueryHeaders)(a, b, c, d, e, f) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpQueryOption(a: *mut u8, b: u32, c: *mut u8, d: *mut u32) -> i32 { (REAL.get().unwrap().QueryOption)(a, b, c, d) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpReadData(a: *mut u8, b: *mut u8, c: u32, d: *mut u32) -> i32 { (REAL.get().unwrap().ReadData)(a, b, c, d) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpReceiveResponse(a: *mut u8, b: *mut u8) -> i32 { (REAL.get().unwrap().ReceiveResponse)(a, b) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpResetAutoProxy(a: *mut u8, b: u32) -> u32 { (REAL.get().unwrap().ResetAutoProxy)(a, b) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpSendRequest(a: *mut u8, b: *const u16, c: u32, d: *mut u8, e: u32, f: u32, g: usize) -> i32 { (REAL.get().unwrap().SendRequest)(a, b, c, d, e, f, g) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpSetCredentials(a: *mut u8, b: u32, c: u32, d: *const u16, e: *const u16, f: *mut u8) -> i32 { (REAL.get().unwrap().SetCredentials)(a, b, c, d, e, f) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpSetDefaultProxyConfiguration(a: *mut u8) -> i32 { (REAL.get().unwrap().SetDefaultProxyConfiguration)(a) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpSetOption(a: *mut u8, b: u32, c: *mut u8, d: u32) -> i32 { (REAL.get().unwrap().SetOption)(a, b, c, d) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpSetStatusCallback(a: *mut u8, b: *mut u8, c: u32, d: usize) -> *mut u8 { (REAL.get().unwrap().SetStatusCallback)(a, b, c, d) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpSetTimeouts(a: *mut u8, b: i32, c: i32, d: i32, e: i32) -> i32 { (REAL.get().unwrap().SetTimeouts)(a, b, c, d, e) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpTimeFromSystemTime(a: *const u8, b: *mut u16) -> i32 { (REAL.get().unwrap().TimeFromSystemTime)(a, b) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpTimeToSystemTime(a: *const u16, b: *mut u8) -> i32 { (REAL.get().unwrap().TimeToSystemTime)(a, b) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpWriteData(a: *mut u8, b: *const u8, c: u32, d: *mut u32) -> i32 { (REAL.get().unwrap().WriteData)(a, b, c, d) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpWebSocketClose(a: *mut u8, b: u16, c: *const u8, d: u32) -> u32 { (REAL.get().unwrap().WebSocketClose)(a, b, c, d) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpWebSocketCompleteUpgrade(a: *mut u8, b: usize) -> *mut u8 { (REAL.get().unwrap().WebSocketCompleteUpgrade)(a, b) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpWebSocketQueryCloseStatus(a: *mut u8, b: *mut u16, c: *mut u8, d: u32, e: *mut u32) -> u32 { (REAL.get().unwrap().WebSocketQueryCloseStatus)(a, b, c, d, e) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpWebSocketReceive(a: *mut u8, b: *mut u8, c: u32, d: *mut u32, e: *mut u32) -> u32 { (REAL.get().unwrap().WebSocketReceive)(a, b, c, d, e) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpWebSocketSend(a: *mut u8, b: u32, c: *mut u8, d: u32) -> u32 { (REAL.get().unwrap().WebSocketSend)(a, b, c, d) }
-#[no_mangle] pub unsafe extern "system" fn WinHttpWebSocketShutdown(a: *mut u8, b: u16, c: *mut u8, d: u32) -> u32 { (REAL.get().unwrap().WebSocketShutdown)(a, b, c, d) }
-#[no_mangle] pub unsafe extern "system" fn SvchostPushServiceGlobals(a: *mut u8) -> u32 { (REAL.get().unwrap().SvchostPushServiceGlobals)(a) }
+#[no_mangle] pub unsafe extern "system" fn accept(a: usize, b: *mut u8, c: *mut i32) -> usize { (REAL.get().unwrap().accept)(a, b, c) }
+#[no_mangle] pub unsafe extern "system" fn closesocket(a: usize) -> i32 { (REAL.get().unwrap().closesocket)(a) }
+#[no_mangle] pub unsafe extern "system" fn connect(a: usize, b: *const u8, c: i32) -> i32 { (REAL.get().unwrap().connect)(a, b, c) }
+#[no_mangle] pub unsafe extern "system" fn getpeername(a: usize, b: *mut u8, c: *mut i32) -> i32 { (REAL.get().unwrap().getpeername)(a, b, c) }
+#[no_mangle] pub unsafe extern "system" fn getsockname(a: usize, b: *mut u8, c: *mut i32) -> i32 { (REAL.get().unwrap().getsockname)(a, b, c) }
+#[no_mangle] pub unsafe extern "system" fn getsockopt(a: usize, b: i32, c: i32, d: *mut u8, e: *mut i32) -> i32 { (REAL.get().unwrap().getsockopt)(a, b, c, d, e) }
+#[no_mangle] pub unsafe extern "system" fn htonl(a: u32) -> u32 { (REAL.get().unwrap().htonl)(a) }
+#[no_mangle] pub unsafe extern "system" fn htons(a: u16) -> u16 { (REAL.get().unwrap().htons)(a) }
+#[no_mangle] pub unsafe extern "system" fn inet_addr(a: *const i8) -> u32 { (REAL.get().unwrap().inet_addr)(a) }
+#[no_mangle] pub unsafe extern "system" fn inet_ntoa(a: u32) -> *mut i8 { (REAL.get().unwrap().inet_ntoa)(a) }
+#[no_mangle] pub unsafe extern "system" fn ioctlsocket(a: usize, b: i32, c: *mut u32) -> i32 { (REAL.get().unwrap().ioctlsocket)(a, b, c) }
+#[no_mangle] pub unsafe extern "system" fn listen(a: usize, b: i32) -> i32 { (REAL.get().unwrap().listen)(a, b) }
+#[no_mangle] pub unsafe extern "system" fn ntohl(a: u32) -> u32 { (REAL.get().unwrap().ntohl)(a) }
+#[no_mangle] pub unsafe extern "system" fn ntohs(a: u16) -> u16 { (REAL.get().unwrap().ntohs)(a) }
+#[no_mangle] pub unsafe extern "system" fn recv(a: usize, b: *mut u8, c: i32, d: i32) -> i32 { (REAL.get().unwrap().recv)(a, b, c, d) }
+#[no_mangle] pub unsafe extern "system" fn recvfrom(a: usize, b: *mut u8, c: i32, d: i32, e: *mut u8, f: *mut i32) -> i32 { (REAL.get().unwrap().recvfrom)(a, b, c, d, e, f) }
+#[no_mangle] pub unsafe extern "system" fn select(a: i32, b: *mut u8, c: *mut u8, d: *mut u8, e: *const u8) -> i32 { (REAL.get().unwrap().select)(a, b, c, d, e) }
+#[no_mangle] pub unsafe extern "system" fn send(a: usize, b: *const u8, c: i32, d: i32) -> i32 { (REAL.get().unwrap().send)(a, b, c, d) }
+#[no_mangle] pub unsafe extern "system" fn sendto(a: usize, b: *const u8, c: i32, d: i32, e: *const u8, f: i32) -> i32 { (REAL.get().unwrap().sendto)(a, b, c, d, e, f) }
+#[no_mangle] pub unsafe extern "system" fn setsockopt(a: usize, b: i32, c: i32, d: *const u8, e: i32) -> i32 { (REAL.get().unwrap().setsockopt)(a, b, c, d, e) }
+#[no_mangle] pub unsafe extern "system" fn shutdown(a: usize, b: i32) -> i32 { (REAL.get().unwrap().shutdown)(a, b) }
+#[no_mangle] pub unsafe extern "system" fn socket(a: i32, b: i32, c: i32) -> usize { (REAL.get().unwrap().socket)(a, b, c) }
+#[no_mangle] pub unsafe extern "system" fn MigrateWinsockConfiguration() { (REAL.get().unwrap().MigrateWinsockConfiguration)() }
+#[no_mangle] pub unsafe extern "system" fn gethostbyaddr(a: *const u8, b: i32, c: i32) -> *mut u8 { (REAL.get().unwrap().gethostbyaddr)(a, b, c) }
+#[no_mangle] pub unsafe extern "system" fn gethostbyname(a: *const i8) -> *mut u8 { (REAL.get().unwrap().gethostbyname)(a) }
+#[no_mangle] pub unsafe extern "system" fn getprotobyname(a: *const i8) -> *mut u8 { (REAL.get().unwrap().getprotobyname)(a) }
+#[no_mangle] pub unsafe extern "system" fn getprotobynumber(a: i32) -> *mut u8 { (REAL.get().unwrap().getprotobynumber)(a) }
+#[no_mangle] pub unsafe extern "system" fn getservbyname(a: *const i8, b: *const i8) -> *mut u8 { (REAL.get().unwrap().getservbyname)(a, b) }
+#[no_mangle] pub unsafe extern "system" fn getservbyport(a: i32, b: *const i8) -> *mut u8 { (REAL.get().unwrap().getservbyport)(a, b) }
+#[no_mangle] pub unsafe extern "system" fn gethostname(a: *mut i8, b: i32) -> i32 { (REAL.get().unwrap().gethostname)(a, b) }
+#[no_mangle] pub unsafe extern "system" fn WSAAsyncSelect(a: usize, b: *mut u8, c: u32, d: i32) -> i32 { (REAL.get().unwrap().WSAAsyncSelect)(a, b, c, d) }
+#[no_mangle] pub unsafe extern "system" fn WSAAsyncGetHostByAddr(a: *mut u8, b: u32, c: *const u8, d: i32, e: i32, f: *mut i8, g: i32) -> *mut u8 { (REAL.get().unwrap().WSAAsyncGetHostByAddr)(a, b, c, d, e, f, g) }
+#[no_mangle] pub unsafe extern "system" fn WSAAsyncGetHostByName(a: *mut u8, b: u32, c: *const i8, d: *mut i8, e: i32) -> *mut u8 { (REAL.get().unwrap().WSAAsyncGetHostByName)(a, b, c, d, e) }
+#[no_mangle] pub unsafe extern "system" fn WSAAsyncGetProtoByNumber(a: *mut u8, b: u32, c: i32, d: *mut i8, e: i32) -> *mut u8 { (REAL.get().unwrap().WSAAsyncGetProtoByNumber)(a, b, c, d, e) }
+#[no_mangle] pub unsafe extern "system" fn WSAAsyncGetProtoByName(a: *mut u8, b: u32, c: *const i8, d: *mut i8, e: i32) -> *mut u8 { (REAL.get().unwrap().WSAAsyncGetProtoByName)(a, b, c, d, e) }
+#[no_mangle] pub unsafe extern "system" fn WSAAsyncGetServByPort(a: *mut u8, b: u32, c: i32, d: *const i8, e: *mut i8, f: i32) -> *mut u8 { (REAL.get().unwrap().WSAAsyncGetServByPort)(a, b, c, d, e, f) }
+#[no_mangle] pub unsafe extern "system" fn WSAAsyncGetServByName(a: *mut u8, b: u32, c: *const i8, d: *const i8, e: *mut i8, f: i32) -> *mut u8 { (REAL.get().unwrap().WSAAsyncGetServByName)(a, b, c, d, e, f) }
+#[no_mangle] pub unsafe extern "system" fn WSACancelAsyncRequest(a: *mut u8) -> i32 { (REAL.get().unwrap().WSACancelAsyncRequest)(a) }
+#[no_mangle] pub unsafe extern "system" fn WSASetBlockingHook(a: *mut u8) -> *mut u8 { (REAL.get().unwrap().WSASetBlockingHook)(a) }
+#[no_mangle] pub unsafe extern "system" fn WSAUnhookBlockingHook() -> i32 { (REAL.get().unwrap().WSAUnhookBlockingHook)() }
+#[no_mangle] pub unsafe extern "system" fn WSAGetLastError() -> i32 { (REAL.get().unwrap().WSAGetLastError)() }
+#[no_mangle] pub unsafe extern "system" fn WSASetLastError(a: i32) { (REAL.get().unwrap().WSASetLastError)(a) }
+#[no_mangle] pub unsafe extern "system" fn WSACancelBlockingCall() -> i32 { (REAL.get().unwrap().WSACancelBlockingCall)() }
+#[no_mangle] pub unsafe extern "system" fn WSAIsBlocking() -> i32 { (REAL.get().unwrap().WSAIsBlocking)() }
+#[no_mangle] pub unsafe extern "system" fn WSAStartup(a: u16, b: *mut u8) -> i32 { (REAL.get().unwrap().WSAStartup)(a, b) }
+#[no_mangle] pub unsafe extern "system" fn WSACleanup() -> i32 { (REAL.get().unwrap().WSACleanup)() }
+#[no_mangle] pub unsafe extern "system" fn __WSAFDIsSet(a: usize, b: *mut u8) -> i32 { (REAL.get().unwrap().__WSAFDIsSet)(a, b) }
+#[no_mangle] pub unsafe extern "system" fn WEP() { (REAL.get().unwrap().WEP)() }
+#[no_mangle] pub unsafe extern "system" fn WSApSetPostRoutine(a: *mut u8) -> i32 { (REAL.get().unwrap().WSApSetPostRoutine)(a) }
+#[no_mangle] pub unsafe extern "system" fn inet_network(a: *const i8) -> u32 { (REAL.get().unwrap().inet_network)(a) }
+#[no_mangle] pub unsafe extern "system" fn getnetbyname(a: *const i8) -> *mut u8 { (REAL.get().unwrap().getnetbyname)(a) }
+#[no_mangle] pub unsafe extern "system" fn rcmd(a: *mut *mut u8, b: u16, c: *const i8, d: *const i8, e: *const i8, f: *mut i32) -> i32 { (REAL.get().unwrap().rcmd)(a, b, c, d, e, f) }
+#[no_mangle] pub unsafe extern "system" fn rexec(a: *mut *mut u8, b: u16, c: *const i8, d: *const i8, e: *const i8, f: *mut i32) -> i32 { (REAL.get().unwrap().rexec)(a, b, c, d, e, f) }
+#[no_mangle] pub unsafe extern "system" fn rresvport(a: *mut i32) -> i32 { (REAL.get().unwrap().rresvport)(a) }
+#[no_mangle] pub unsafe extern "system" fn sethostname(a: *mut i8, b: i32) -> i32 { (REAL.get().unwrap().sethostname)(a, b) }
+#[no_mangle] pub unsafe extern "system" fn dn_expand(a: *const u8, b: *const u8, c: *const u8, d: *mut i8, e: i32) -> i32 { (REAL.get().unwrap().dn_expand)(a, b, c, d, e) }
+#[no_mangle] pub unsafe extern "system" fn WSARecvEx(a: usize, b: *mut u8, c: i32, d: *mut i32) -> i32 { (REAL.get().unwrap().WSARecvEx)(a, b, c, d) }
+#[no_mangle] pub unsafe extern "system" fn s_perror(a: *const i8) { (REAL.get().unwrap().s_perror)(a) }
+#[no_mangle] pub unsafe extern "system" fn GetAddressByNameA(a: *const u8, b: *const i8, c: *const i8, d: *const i8, e: *const i8, f: i32, g: i32, h: *const u8, i: i32, j: *mut u8, k: *mut i32) -> i32 { (REAL.get().unwrap().GetAddressByNameA)(a, b, c, d, e, f, g, h, i, j, k) }
+#[no_mangle] pub unsafe extern "system" fn GetAddressByNameW(a: *const u8, b: *const u16, c: *const u16, d: *const u16, e: *const u16, f: i32, g: i32, h: *const u8, i: i32, j: *mut u8, k: *mut i32) -> i32 { (REAL.get().unwrap().GetAddressByNameW)(a, b, c, d, e, f, g, h, i, j, k) }
+#[no_mangle] pub unsafe extern "system" fn EnumProtocolsA(a: *mut i32, b: *mut u8, c: *mut u32) -> i32 { (REAL.get().unwrap().EnumProtocolsA)(a, b, c) }
+#[no_mangle] pub unsafe extern "system" fn EnumProtocolsW(a: *mut i32, b: *mut u8, c: *mut u32) -> i32 { (REAL.get().unwrap().EnumProtocolsW)(a, b, c) }
+#[no_mangle] pub unsafe extern "system" fn GetTypeByNameA(a: *const i8, b: *mut u8) -> i32 { (REAL.get().unwrap().GetTypeByNameA)(a, b) }
+#[no_mangle] pub unsafe extern "system" fn GetTypeByNameW(a: *const u16, b: *mut u8) -> i32 { (REAL.get().unwrap().GetTypeByNameW)(a, b) }
+#[no_mangle] pub unsafe extern "system" fn GetNameByTypeA(a: *mut u8, b: *mut u8, c: u32) -> i32 { (REAL.get().unwrap().GetNameByTypeA)(a, b, c) }
+#[no_mangle] pub unsafe extern "system" fn GetNameByTypeW(a: *mut u8, b: *mut u8, c: u32) -> i32 { (REAL.get().unwrap().GetNameByTypeW)(a, b, c) }
+#[no_mangle] pub unsafe extern "system" fn SetServiceA(a: *mut u8, b: u32, c: u32, d: u32) -> i32 { (REAL.get().unwrap().SetServiceA)(a, b, c, d) }
+#[no_mangle] pub unsafe extern "system" fn SetServiceW(a: *mut u8, b: u32, c: u32, d: u32) -> i32 { (REAL.get().unwrap().SetServiceW)(a, b, c, d) }
+#[no_mangle] pub unsafe extern "system" fn GetServiceA(a: *mut u8, b: *mut u8, c: *mut u8, d: *mut u32) -> i32 { (REAL.get().unwrap().GetServiceA)(a, b, c, d) }
+#[no_mangle] pub unsafe extern "system" fn GetServiceW(a: *mut u8, b: *mut u8, c: *mut u8, d: *mut u32) -> i32 { (REAL.get().unwrap().GetServiceW)(a, b, c, d) }
+#[no_mangle] pub unsafe extern "system" fn NPLoadNameSpaces(a: *mut u8, b: *mut u8, c: *mut u8) -> u32 { (REAL.get().unwrap().NPLoadNameSpaces)(a, b, c) }
+#[no_mangle] pub unsafe extern "system" fn TransmitFile(a: usize, b: *mut u8, c: u32, d: u32, e: *mut u8, f: *mut u8, g: u32) -> i32 { (REAL.get().unwrap().TransmitFile)(a, b, c, d, e, f, g) }
+#[no_mangle] pub unsafe extern "system" fn AcceptEx(a: usize, b: usize, c: *mut u8, d: u32, e: u32, f: u32, g: *mut u32, h: *mut u8) -> i32 { (REAL.get().unwrap().AcceptEx)(a, b, c, d, e, f, g, h) }
+#[no_mangle] pub unsafe extern "system" fn GetAcceptExSockaddrs(a: *mut u8, b: u32, c: u32, d: u32, e: *mut *mut u8, f: *mut i32, g: *mut *mut u8, h: *mut i32) { (REAL.get().unwrap().GetAcceptExSockaddrs)(a, b, c, d, e, f, g, h) }
+
+//  bind() — intercepted: block Steam from taking port 27060
+const WSAEADDRINUSE: i32 = 10048;
+#[no_mangle]
+pub unsafe extern "system" fn bind(s: usize, name: *const u8, namelen: i32) -> i32 {
+    if namelen >= 8 {
+        let family = *(name as *const u16);
+        if family == 2 { // AF_INET
+            let port = u16::from_be(*(name.add(2) as *const u16));
+            if port == 27060 {
+                log("bind() interceptado: bloqueando puerto 27060");
+                (REAL.get().unwrap().WSASetLastError)(WSAEADDRINUSE);
+                return -1;
+            }
+        }
+    }
+    (REAL.get().unwrap().bind)(s, name, namelen)
+}
