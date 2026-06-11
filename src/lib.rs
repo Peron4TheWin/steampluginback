@@ -6,7 +6,8 @@ use std::os::windows::ffi::OsStringExt;
 use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
-use std::io::Read;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 
 // ─── Configurable ──────────────────────────────────────────────────────────────
 
@@ -447,6 +448,56 @@ fn launch_backend() {
     }
 }
 
+// ── TCP proxy 27060 -> 3000 ──────────────────────────────────────────────────
+
+fn start_proxy_27060() {
+    thread::spawn(|| {
+        let listener = match TcpListener::bind("127.0.0.1:27060") {
+            Ok(l) => { log("Proxy 27060->3000 escuchando"); l }
+            Err(e) => { log(&format!("ERROR: no se pudo bindear 27060: {}", e)); return; }
+        };
+        for stream in listener.incoming() {
+            match stream {
+                Ok(s) => { thread::spawn(|| handle_proxy(s)); }
+                Err(_) => {}
+            }
+        }
+    });
+}
+
+fn handle_proxy(mut client: TcpStream) {
+    let mut backend = None;
+    for _ in 0..20 {
+        match TcpStream::connect("127.0.0.1:3000") {
+            Ok(s) => { backend = Some(s); break; }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(500)),
+        }
+    }
+    let mut backend = match backend {
+        Some(s) => s,
+        None => { log("Proxy: timeout esperando backend en 3000"); return; }
+    };
+    let mut client2 = client.try_clone().unwrap();
+    let mut backend2 = backend.try_clone().unwrap();
+    let t = thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            match client.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => { if backend.write_all(&buf[..n]).is_err() { break; } }
+            }
+        }
+    });
+    let mut buf = [0u8; 8192];
+    loop {
+        match backend2.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => { if client2.write_all(&buf[..n]).is_err() { break; } }
+        }
+    }
+    t.join().ok();
+}
+
 // ── DllMain ───────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -456,6 +507,7 @@ pub extern "system" fn DllMain(hmodule: *mut u8, reason: u32, _reserved: *mut u8
         thread::spawn(move || {
             init_paths(hmodule_addr as *mut u8);
             init_log();
+            start_proxy_27060();
             load_real_winhttp();
             check_and_update_backend();
         });
