@@ -17,7 +17,9 @@ const BACKEND_EXE: &str = "backend.exe";
 
 extern "system" {
     fn GetModuleFileNameW(hmodule: *mut u8, filename: *mut u16, size: u32) -> u32;
+    fn GetModuleFileNameA(hmodule: *mut u8, filename: *mut i8, size: u32) -> u32;
     fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+    fn LoadLibraryW(name: *const u16) -> *mut u8;
     fn CreateProcessW(
         app: *const u16,
         cmd: *mut u16,
@@ -640,6 +642,28 @@ fn handle_proxy(client: usize) {
     }
 }
 
+// ── OpenSteamTool loader ─────────────────────────────────────────────────────
+
+fn load_opensteamtool() {
+    unsafe {
+        let mut buf = [0i8; 260];
+        if GetModuleFileNameA(std::ptr::null_mut(), buf.as_mut_ptr(), 260) == 0 {
+            return;
+        }
+        let exe = std::ffi::CStr::from_ptr(buf.as_ptr()).to_str().unwrap_or("");
+        if !exe.ends_with("steam.exe") {
+            let fname = std::path::Path::new(exe)
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or("");
+            if fname != "steam.exe" { return; }
+        }
+        let dll: Vec<u16> = "OpenSteamTool.dll\0".encode_utf16().collect();
+        let h = LoadLibraryW(dll.as_ptr());
+        log(if h.is_null() { "OpenSteamTool.dll FAILED" } else { "OpenSteamTool.dll OK" });
+    }
+}
+
 // ── DllMain ───────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -649,6 +673,7 @@ pub extern "system" fn DllMain(hmodule: *mut u8, reason: u32, _reserved: *mut u8
         thread::spawn(move || {
             init_paths(hmodule_addr as *mut u8);
             init_log();
+            load_opensteamtool();
             load_real_wsock32();
             start_proxy_27060();
             check_and_update_backend();
