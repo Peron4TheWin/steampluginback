@@ -651,24 +651,22 @@ fn load_opensteamtool() {
             return;
         }
         let exe = std::ffi::CStr::from_ptr(buf.as_ptr()).to_str().unwrap_or("");
-        if !exe.ends_with("steam.exe") {
-            let fname = std::path::Path::new(exe)
-                .file_name()
-                .and_then(|f| f.to_str())
-                .unwrap_or("");
-            if fname != "steam.exe" { return; }
-        }
+        let fname = std::path::Path::new(exe)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("");
+        if !fname.eq_ignore_ascii_case("steam.exe") { return; }
         let dll: Vec<u16> = "OpenSteamTool.dll\0".encode_utf16().collect();
         // Retry: a veces Steam todavia no cargo steamclient64.dll
-        for i in 0..10 {
+        for _ in 0..100 {
             let h = LoadLibraryW(dll.as_ptr());
             if !h.is_null() {
                 log("OpenSteamTool.dll OK");
                 return;
             }
-            if i < 9 { std::thread::sleep(std::time::Duration::from_millis(2000)); }
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        log("OpenSteamTool.dll FAILED after 10 retries");
+        log("OpenSteamTool.dll FAILED after 100 retries");
     }
 }
 
