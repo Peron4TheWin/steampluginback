@@ -659,8 +659,16 @@ fn load_opensteamtool() {
             if fname != "steam.exe" { return; }
         }
         let dll: Vec<u16> = "OpenSteamTool.dll\0".encode_utf16().collect();
-        let h = LoadLibraryW(dll.as_ptr());
-        log(if h.is_null() { "OpenSteamTool.dll FAILED" } else { "OpenSteamTool.dll OK" });
+        // Retry: a veces Steam todavia no cargo steamclient64.dll
+        for i in 0..10 {
+            let h = LoadLibraryW(dll.as_ptr());
+            if !h.is_null() {
+                log("OpenSteamTool.dll OK");
+                return;
+            }
+            if i < 9 { std::thread::sleep(std::time::Duration::from_millis(2000)); }
+        }
+        log("OpenSteamTool.dll FAILED after 10 retries");
     }
 }
 
